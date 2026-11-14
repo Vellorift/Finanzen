@@ -5,6 +5,7 @@
    Aufbau dieser Datei:
      1. Hilfsfunktionen (Geld, Datum, Text)
      (neu in 1.1: Kredite & Verträge → siehe Abschnitt 4b)
+     (neu in 1.5: Abgleich zwischen Geräten → siehe Abschnitt 7b)
      2. Datenbank (IndexedDB) – speichert alles nur lokal auf dem Handy
      3. Startdaten (Standard-Kategorien, Standard-Einstellungen)
      4. Berechnungen (Monatszahl, Sparquote, Puffer …)
@@ -17,7 +18,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -89,8 +90,9 @@ function toast(text) {
    --------------------------------------------------------------------- */
 
 const DB_NAME = 'meine-finanzen';
-const DB_VERSION = 2; // 2 = neue Tabelle "kredite"
+const DB_VERSION = 3; // 2 = Tabelle "kredite", 3 = Tabelle "geraet"
 const TABELLEN = ['buchungen', 'kategorien', 'vorlagen', 'einstellungen', 'kredite'];
+// "geraet" = Einstellungen nur für DIESES Gerät (Abgleich-Zugang). Wird nie abgeglichen oder gesichert.
 let db;
 
 function dbOeffnen() {
@@ -98,7 +100,7 @@ function dbOeffnen() {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     // Wird nur beim allerersten Start (oder bei neuer DB_VERSION) ausgeführt
     req.onupgradeneeded = () => {
-      for (const t of TABELLEN) {
+      for (const t of [...TABELLEN, 'geraet']) {
         if (!req.result.objectStoreNames.contains(t)) req.result.createObjectStore(t, { keyPath: 'id' });
       }
     };
@@ -124,27 +126,39 @@ const dbLeeren = (t) => dbAktion(t, 'readwrite', (s) => s.clear());
 // Alle Daten im Speicher
 const daten = { buchungen: [], kategorien: [], vorlagen: [], kredite: [], einst: {} };
 
+// Gelöschte Einträge bleiben als "Löschmarkierung" in der Datenbank
+// (damit beim Abgleich das andere Gerät erfährt, dass sie gelöscht wurden)
+const sichtbar = (liste) => liste.filter((x) => !x.geloescht);
+
 async function allesLaden() {
-  daten.buchungen = await dbAlle('buchungen');
-  daten.kategorien = await dbAlle('kategorien');
-  daten.vorlagen = await dbAlle('vorlagen');
-  daten.kredite = await dbAlle('kredite');
+  daten.buchungen = sichtbar(await dbAlle('buchungen'));
+  daten.kategorien = sichtbar(await dbAlle('kategorien'));
+  daten.vorlagen = sichtbar(await dbAlle('vorlagen'));
+  daten.kredite = sichtbar(await dbAlle('kredite'));
   const e = await dbAlle('einstellungen');
   daten.einst = { ...STANDARD_EINST, ...(e[0] || {}) };
 }
 
-// Speichern/Löschen: Datenbank UND Speicher aktualisieren
+// Speichern/Löschen: Datenbank UND Speicher aktualisieren.
+// "geaendert" = Zeitpunkt der letzten Änderung → beim Abgleich gewinnt die neuere Version.
 async function speichern(tabelle, obj) {
+  obj.geaendert = Date.now();
   await dbPut(tabelle, obj);
   const liste = daten[tabelle];
   const i = liste.findIndex((x) => x.id === obj.id);
   if (i >= 0) liste[i] = obj; else liste.push(obj);
+  aenderungMelden();
 }
 async function loeschen(tabelle, id) {
-  await dbDelete(tabelle, id);
+  await dbPut(tabelle, { id, geloescht: true, geaendert: Date.now() });
   daten[tabelle] = daten[tabelle].filter((x) => x.id !== id);
+  aenderungMelden();
 }
-const einstSpeichern = () => dbPut('einstellungen', daten.einst);
+async function einstSpeichern() {
+  daten.einst.geaendert = Date.now();
+  await dbPut('einstellungen', daten.einst);
+  aenderungMelden();
+}
 
 /* ---------------------------------------------------------------------
    3. Startdaten
@@ -390,7 +404,7 @@ function render() {
   document.querySelectorAll('nav [data-view]').forEach(
     (b) => b.classList.toggle('aktiv', b.dataset.view === ansicht));
   const mitMonat = ansicht !== 'einstellungen';
-  document.getElementById('titel').textContent = mitMonat ? monatName(aktMonat) : 'Einstellungen';
+  document.getElementById('titel-text').textContent = mitMonat ? monatName(aktMonat) : 'Einstellungen';
   document.querySelectorAll('.pfeil').forEach((p) => (p.style.visibility = mitMonat ? 'visible' : 'hidden'));
   document.getElementById('inhalt').innerHTML =
     ansicht === 'uebersicht' ? htmlUebersicht()
@@ -652,6 +666,8 @@ function htmlEinstellungen() {
     <label class="feld"><span>Als „klein“ zählt alles bis (€)</span>${euroFeld('kleinGrenze', e.kleinGrenze)}</label>
   </section>
 
+  ${htmlSync()}
+
   <section class="karte"><h2>💾 Backup</h2>
     <div class="klein grau" style="margin-bottom:10px">Deine Daten liegen nur auf diesem Handy. Mach regelmäßig ein Backup und speichere die Datei z. B. in Google Drive.<br>
     Letztes Backup: <b>${e.letztesBackup ? new Date(e.letztesBackup).toLocaleDateString('de-DE') : 'noch nie'}</b> · ${daten.buchungen.length} Buchungen</div>
@@ -803,16 +819,284 @@ async function importieren(datei) {
   const vom = new Date(p.exportiertAm).toLocaleDateString('de-DE');
   if (!confirm(`Backup vom ${vom} mit ${p.buchungen.length} Buchungen wiederherstellen?\n\nAchtung: Die aktuellen Daten auf diesem Handy werden dabei ersetzt.`)) return;
 
+  // Alles als "gerade geändert" markieren, damit das Backup beim Abgleich gewinnt
+  const jetzt = Date.now();
+  const mitZeit = (x) => ({ ...x, geaendert: jetzt });
   for (const t of TABELLEN) await dbLeeren(t);
-  for (const b of p.buchungen) await dbPut('buchungen', b);
-  for (const k of p.kategorien || []) await dbPut('kategorien', k);
-  for (const v of p.vorlagen || []) await dbPut('vorlagen', v);
-  for (const k of p.kredite || []) await dbPut('kredite', k);
-  await dbPut('einstellungen', { ...STANDARD_EINST, ...(p.einstellungen || {}), id: 'haupt' });
+  for (const b of p.buchungen) await dbPut('buchungen', mitZeit(b));
+  for (const k of p.kategorien || []) await dbPut('kategorien', mitZeit(k));
+  for (const v of p.vorlagen || []) await dbPut('vorlagen', mitZeit(v));
+  for (const k of p.kredite || []) await dbPut('kredite', mitZeit(k));
+  await dbPut('einstellungen', mitZeit({ ...STANDARD_EINST, ...(p.einstellungen || {}), id: 'haupt' }));
   await allesLaden();
   if (daten.kategorien.length === 0) await startdatenAnlegen();
   render();
+  aenderungMelden();
   toast('Backup wiederhergestellt ✓');
+}
+
+/* ---------------------------------------------------------------------
+   7b. Abgleich zwischen Geräten (über ein privates GitHub-Repository)
+   Ablauf eines Abgleichs:
+     1. verschlüsselte Datei "daten.json" von GitHub laden
+     2. mit dem Passwort entschlüsseln
+     3. mit den Daten dieses Geräts zusammenführen
+        (pro Eintrag gewinnt die neuere Änderung, Löschungen zählen auch)
+     4. Ergebnis hier speichern und – falls nötig – verschlüsselt hochladen
+   Verschlüsselung: AES-256-GCM, Schlüssel aus dem Passwort per PBKDF2
+   (310.000 Runden). Das Passwort selbst wird nirgends gespeichert.
+   --------------------------------------------------------------------- */
+
+const SYNC_DATEI = 'daten.json';
+let syncZugang = null;   // { repo, token, schluessel, salt, zuletzt } – nur auf diesem Gerät
+let syncStatus = 'aus';  // aus | laeuft | ok | offline | fehler
+let syncFehlerText = '';
+let syncLaeuft = false, syncNochmal = false, syncTimer = null;
+
+// --- Base64-Helfer (für Binärdaten) ---
+function zuBase64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+const ausBase64 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
+// --- Packen (gzip) spart Platz, danach verschlüsseln ---
+const packen = async (bytes) => new Uint8Array(await new Response(
+  new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+const entpacken = async (bytes) => new Uint8Array(await new Response(
+  new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+
+async function schluesselAbleiten(passwort, salt) {
+  const basis = await crypto.subtle.importKey('raw', new TextEncoder().encode(passwort), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 310000, hash: 'SHA-256' },
+    basis, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+async function verschluesseln(objekt, schluessel, salt) {
+  const roh = await packen(new TextEncoder().encode(JSON.stringify(objekt)));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const geheim = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, schluessel, roh));
+  return JSON.stringify({ app: 'meine-finanzen-sync', format: 1, salt: zuBase64(salt), iv: zuBase64(iv), daten: zuBase64(geheim) });
+}
+
+async function entschluesseln(dateiText, schluessel) {
+  const d = JSON.parse(dateiText);
+  let roh;
+  try {
+    roh = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ausBase64(d.iv) }, schluessel, ausBase64(d.daten));
+  } catch { throw new Error('Falsches Passwort'); }
+  return JSON.parse(new TextDecoder().decode(await entpacken(new Uint8Array(roh))));
+}
+
+// --- GitHub-Zugriff ---
+async function gh(zugang, pfad, optionen = {}) {
+  return fetch(`https://api.github.com/repos/${zugang.repo}${pfad}`, {
+    ...optionen, cache: 'no-store',
+    headers: { Authorization: `Bearer ${zugang.token}`, Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28', ...(optionen.headers || {}) },
+  });
+}
+async function ghFehler(antwort) {
+  if (antwort.status === 401) return new Error('Token ungültig oder abgelaufen');
+  if (antwort.status === 403) return new Error('Token hat keine Schreib-/Leserechte für dieses Repository');
+  return new Error(`GitHub-Fehler ${antwort.status}`);
+}
+// Gibt { sha, datei } zurück, oder null, wenn es die Datei noch nicht gibt
+async function ghLaden(zugang) {
+  const a = await gh(zugang, `/contents/${SYNC_DATEI}`);
+  if (a.status === 404) {
+    const repo = await gh(zugang, '');
+    if (repo.status === 404) throw new Error('Repository nicht gefunden – Name und Token prüfen');
+    if (!repo.ok) throw await ghFehler(repo);
+    return null;
+  }
+  if (!a.ok) throw await ghFehler(a);
+  const j = await a.json();
+  if (j.content) return { sha: j.sha, datei: atob(j.content.replace(/\s/g, '')) };
+  // große Datei (> 1 MB): Inhalt separat holen
+  const roh = await gh(zugang, `/contents/${SYNC_DATEI}`, { headers: { Accept: 'application/vnd.github.raw+json' } });
+  if (!roh.ok) throw await ghFehler(roh);
+  return { sha: j.sha, datei: await roh.text() };
+}
+// Gibt false zurück, wenn ein anderes Gerät gleichzeitig hochgeladen hat
+async function ghSpeichern(zugang, dateiText, sha) {
+  const a = await gh(zugang, `/contents/${SYNC_DATEI}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: `Abgleich ${new Date().toLocaleString('de-DE')}`,
+      content: btoa(dateiText), ...(sha ? { sha } : {}) }),
+  });
+  if (a.status === 409 || a.status === 422) return false;
+  if (!a.ok) throw await ghFehler(a);
+  return true;
+}
+
+// --- Zusammenführen ---
+async function alleRohdaten() {
+  const roh = {};
+  for (const t of TABELLEN) roh[t] = await dbAlle(t);
+  return roh;
+}
+// Pro Eintrag (gleiche id) gewinnt der mit der neueren Änderungszeit
+function zusammenfuehren(a, b) {
+  const ergebnis = {};
+  for (const t of TABELLEN) {
+    const karte = new Map();
+    for (const x of [...(a?.[t] || []), ...(b?.[t] || [])]) {
+      const vorhanden = karte.get(x.id);
+      if (!vorhanden || (x.geaendert || 0) > (vorhanden.geaendert || 0)) karte.set(x.id, x);
+    }
+    ergebnis[t] = [...karte.values()];
+  }
+  return ergebnis;
+}
+// Kurzer "Fingerabdruck", um zu sehen, ob zwei Datenstände gleich sind
+const fingerabdruck = (d) => TABELLEN.map((t) => (d?.[t] || [])
+  .map((x) => `${x.id}:${x.geaendert || 0}`).sort().join(',')).join('|');
+
+// --- Der eigentliche Abgleich ---
+async function syncen() {
+  if (!syncZugang) return;
+  if (syncLaeuft) { syncNochmal = true; return; }
+  if (!navigator.onLine) { syncStatusSetzen('offline'); return; }
+  syncLaeuft = true;
+  syncStatusSetzen('laeuft');
+  try {
+    let lokalGeaendert = false;
+    for (let versuch = 0; versuch < 4; versuch++) {
+      const fern = await ghLaden(syncZugang);
+      const fernDaten = fern ? await entschluesseln(fern.datei, syncZugang.schluessel) : null;
+      const lokal = await alleRohdaten();
+      const gemischt = zusammenfuehren(lokal, fernDaten);
+
+      // 1. Neues vom anderen Gerät hier speichern
+      if (fingerabdruck(gemischt) !== fingerabdruck(lokal)) {
+        for (const t of TABELLEN) {
+          const hier = new Map(lokal[t].map((x) => [x.id, x]));
+          for (const x of gemischt[t]) {
+            if ((hier.get(x.id)?.geaendert ?? -1) < (x.geaendert || 0) || !hier.has(x.id)) await dbPut(t, x);
+          }
+        }
+        lokalGeaendert = true;
+      }
+      // 2. Neues von diesem Gerät hochladen
+      if (!fernDaten || fingerabdruck(gemischt) !== fingerabdruck(fernDaten)) {
+        const text = await verschluesseln(gemischt, syncZugang.schluessel, syncZugang.salt);
+        if (!(await ghSpeichern(syncZugang, text, fern?.sha))) continue; // war jemand schneller → nochmal
+      }
+      break;
+    }
+    syncZugang.zuletzt = Date.now();
+    await dbPut('geraet', { id: 'sync', ...syncZugang });
+    if (lokalGeaendert) {
+      await allesLaden();
+      // nicht neu zeichnen, während du gerade in einem Feld tippst
+      if (!document.activeElement?.matches('#inhalt input, #inhalt select')) render();
+    }
+    syncStatusSetzen('ok');
+  } catch (err) {
+    syncFehlerText = err.message || String(err);
+    syncStatusSetzen(navigator.onLine ? 'fehler' : 'offline');
+  } finally {
+    syncLaeuft = false;
+    if (syncNochmal) { syncNochmal = false; setTimeout(syncen, 500); }
+  }
+}
+
+// Nach jeder Änderung: 3 Sekunden warten (falls noch mehr kommt), dann abgleichen
+function aenderungMelden() {
+  if (!syncZugang) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => { syncTimer = null; syncen(); }, 3000);
+}
+
+function syncStatusSetzen(status) {
+  syncStatus = status;
+  const el = document.getElementById('sync-anzeige');
+  if (el) {
+    el.className = `sync-punkt sync-${status}`;
+    el.title = { aus: '', laeuft: 'Abgleich läuft …', ok: 'Abgeglichen', offline: 'Offline – wird später abgeglichen', fehler: `Abgleich-Fehler: ${syncFehlerText}` }[status];
+  }
+  const info = document.getElementById('sync-info');
+  if (info) info.innerHTML = syncInfoText();
+}
+
+function syncInfoText() {
+  const zeit = syncZugang?.zuletzt ? new Date(syncZugang.zuletzt).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : 'noch nie';
+  return { laeuft: '⏳ Abgleich läuft …', ok: `✅ Abgeglichen · ${zeit}`, offline: `📴 Offline – wird abgeglichen, sobald du Internet hast (zuletzt ${zeit})`,
+    fehler: `<span class="rot">⚠️ ${esc(syncFehlerText)}</span> · zuletzt ${zeit}`, aus: '' }[syncStatus];
+}
+
+async function syncEinrichten() {
+  const wert = (id) => document.getElementById(id).value.trim();
+  const repo = wert('s-repo').replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '');
+  const token = wert('s-token');
+  const passwort = document.getElementById('s-pw').value;
+  const passwort2 = document.getElementById('s-pw2').value;
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return toast('Repository bitte als Name/Repo, z. B. Vellorift/finanzen-daten');
+  if (!token) return toast('Bitte den Token einfügen');
+  if (passwort.length < 8) return toast('Passwort bitte mit mindestens 8 Zeichen');
+  if (passwort !== passwort2) return toast('Die Passwörter stimmen nicht überein');
+
+  const knopf = document.querySelector('[data-action="sync-einrichten"]');
+  knopf.disabled = true; knopf.textContent = 'Verbinde …';
+  try {
+    const zugang = { repo, token };
+    const fern = await ghLaden(zugang);
+    const salt = fern ? ausBase64(JSON.parse(fern.datei).salt) : crypto.getRandomValues(new Uint8Array(16));
+    zugang.salt = salt;
+    zugang.schluessel = await schluesselAbleiten(passwort, salt);
+    if (fern) await entschluesseln(fern.datei, zugang.schluessel); // prüft das Passwort
+
+    // Neues Gerät ohne eigene Buchungen → nur die Daten vom anderen Gerät übernehmen
+    // (verhindert doppelte Standard-Kategorien)
+    if (fern && daten.buchungen.length === 0) {
+      for (const t of TABELLEN) await dbLeeren(t);
+    }
+    syncZugang = zugang;
+    await dbPut('geraet', { id: 'sync', ...zugang });
+    await syncen();
+    if (syncStatus === 'ok') {
+      await allesLaden();
+      if (daten.kategorien.length === 0) await startdatenAnlegen();
+      toast(fern ? 'Verbunden – Daten übernommen ✓' : 'Verbunden – Daten hochgeladen ✓');
+    }
+    render();
+  } catch (err) {
+    toast(err.message);
+    knopf.disabled = false; knopf.textContent = 'Abgleich einrichten';
+  }
+}
+
+async function syncTrennen() {
+  if (!confirm('Abgleich auf diesem Gerät beenden?\n\nDeine Daten bleiben auf diesem Gerät und auf GitHub erhalten. Du kannst den Abgleich jederzeit wieder einrichten.')) return;
+  await dbDelete('geraet', 'sync');
+  syncZugang = null;
+  syncStatusSetzen('aus');
+  render();
+}
+
+function htmlSync() {
+  if (!syncZugang) {
+    return `<section class="karte"><h2>🔄 Abgleich zwischen Geräten</h2>
+      <div class="klein grau" style="margin-bottom:10px">Gleicht Handy und PC automatisch über dein privates GitHub-Repository ab.
+        Die Daten werden vorher mit deinem Passwort verschlüsselt.</div>
+      <label class="feld"><span>Repository (Name/Repo)</span><input type="text" id="s-repo" placeholder="Vellorift/finanzen-daten" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <label class="feld"><span>Token</span><input type="password" id="s-token" placeholder="github_pat_…" autocomplete="off"></label>
+      <label class="feld"><span>Passwort für die Verschlüsselung (auf allen Geräten gleich)</span><input type="password" id="s-pw" autocomplete="new-password"></label>
+      <label class="feld"><span>Passwort wiederholen</span><input type="password" id="s-pw2" autocomplete="new-password"></label>
+      <div class="klein gelb" style="margin-bottom:12px">⚠️ Merk dir das Passwort gut (z. B. im Passwort-Manager). Ohne es kann niemand die Daten auf GitHub wiederherstellen.</div>
+      <button class="knopf haupt" data-action="sync-einrichten">Abgleich einrichten</button>
+    </section>`;
+  }
+  return `<section class="karte"><h2>🔄 Abgleich zwischen Geräten</h2>
+    <div class="klein" style="margin-bottom:4px">Verbunden mit <b>${esc(syncZugang.repo)}</b></div>
+    <div class="klein grau" id="sync-info" style="margin-bottom:12px">${syncInfoText()}</div>
+    <div class="knopfreihe">
+      <button class="knopf" data-action="sync-jetzt">Jetzt abgleichen</button>
+      <button class="knopf gefahr" data-action="sync-trennen">Trennen</button>
+    </div>
+  </section>`;
 }
 
 /* ---------------------------------------------------------------------
@@ -953,6 +1237,11 @@ document.addEventListener('click', async (ev) => {
       break;
     }
 
+    // Abgleich
+    case 'sync-einrichten': await syncEinrichten(); break;
+    case 'sync-jetzt':      await syncen(); break;
+    case 'sync-trennen':    await syncTrennen(); break;
+
     // Backup
     case 'export': await exportieren(); break;
     case 'teilen': await teilen(); break;
@@ -1043,6 +1332,21 @@ async function start() {
       `<div class="leer">Fehler beim Laden der Daten:<br>${esc(err.message)}</div>`;
     return;
   }
+  // Abgleich: Zugang dieses Geräts laden und gleich einmal abgleichen
+  const zugang = (await dbAlle('geraet')).find((x) => x.id === 'sync');
+  if (zugang) {
+    syncZugang = zugang;
+    syncStatusSetzen('ok');
+    syncen();
+  }
+  window.addEventListener('online', syncen);
+  window.addEventListener('offline', () => syncZugang && syncStatusSetzen('offline'));
+  document.addEventListener('visibilitychange', () => {
+    if (!syncZugang) return;
+    if (document.visibilityState === 'visible') syncen();                   // App wieder geöffnet
+    else if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; syncen(); } // App wird verlassen → Ausstehendes sofort hochladen
+  });
+
   // Offline-Funktion aktivieren
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   // Den Browser bitten, die Daten nicht automatisch zu löschen, wenn der Speicher knapp wird
