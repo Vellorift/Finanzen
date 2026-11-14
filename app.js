@@ -18,7 +18,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -57,6 +57,20 @@ function monatVerschieben(m, n) {
   const [j, mo] = m.split('-').map(Number);
   return datumText(new Date(j, mo - 1 + n, 1)).slice(0, 7);
 }
+// Tage verschieben: ("2026-11-14", -1) → "2026-11-13"
+function tagVerschieben(s, n) {
+  const [j, m, t] = s.split('-').map(Number);
+  return datumText(new Date(j, m - 1, t + n));
+}
+// "2026-11-14" → "Sa., 14.11.2026"
+const datumLang = (s) => { const [j, m, t] = s.split('-').map(Number);
+  return new Date(j, m - 1, t).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' }); };
+// "2026-11" → "Nov 2026"
+const monatKurz = (m) => { const [j, mo] = m.split('-').map(Number); return `${MONATE[mo - 1].slice(0, 3)} ${j}`; };
+// Monate zwischen zwei Monaten: ("2026-11", "2027-02") → 3
+const monatsAbstand = (a, b) => { const [ja, ma] = a.split('-').map(Number); const [jb, mb] = b.split('-').map(Number);
+  return (jb - ja) * 12 + (mb - ma); };
+
 // "2026-11-14" → "Sa., 14.11."
 function tagAnzeige(s) {
   const [j, m, t] = s.split('-').map(Number);
@@ -267,8 +281,27 @@ function kleineAusgaben(m) {
   return { summe, anzahl, mehrfach };
 }
 
-// Monatliche Vorlagen (Fixkosten, Gehalt, Sparrate), die im Monat noch nicht eingetragen sind
+// Rhythmus regelmäßiger Buchungen: alle 1, 3, 6 oder 12 Monate
+const INTERVALLE = [[1, 'Monatlich'], [3, 'Vierteljährlich'], [6, 'Halbjährlich'], [12, 'Jährlich']];
+const intervallName = (iv) => (INTERVALLE.find(([n]) => n === iv) || [0, `alle ${iv} Monate`])[1];
+
+// Ist die Vorlage im Monat m fällig? (monatlich immer, sonst ab startMonat alle X Monate)
+function vorlageFaellig(v, m) {
+  const iv = v.intervall || 1;
+  if (iv === 1) return true;
+  const abstand = monatsAbstand(v.startMonat || m, m);
+  return abstand >= 0 && abstand % iv === 0;
+}
+// Nächster Monat (ab heute), in dem die Vorlage fällig ist
+function naechsteFaelligkeit(v) {
+  const jetzt = heute().slice(0, 7);
+  for (let i = 0; i <= 12; i++) { const m = monatVerschieben(jetzt, i); if (vorlageFaellig(v, m)) return m; }
+  return null;
+}
+
+// Regelmäßige Vorlagen (Fixkosten, Gehalt, Sparrate, Versicherung …), die im Monat fällig, aber noch nicht eingetragen sind
 const fehlendeVorlagen = (m) => daten.vorlagen.filter((v) => {
+  if (!vorlageFaellig(v, m)) return false;
   if (v.kreditId) { // Rate eines Kredits: nach der letzten Rate nicht mehr vorschlagen
     const k = daten.kredite.find((x) => x.id === v.kreditId);
     if (k) { const ende = kreditInfo(k).ende; if (!ende || m > ende) return false; }
@@ -349,6 +382,37 @@ function tagLesen(id) {
 function tagAusDatum(datum) {
   const [j, m, t] = datum.split('-').map(Number);
   return t === new Date(j, m, 0).getDate() ? 31 : t;
+}
+
+// Rhythmus-Auswahl: Monatlich · Vierteljährlich · Halbjährlich · Jährlich
+// mitStart = zusätzlich "Nächste Zahlung im …" anzeigen
+function htmlIntervallWahl(id, iv = 1, startMonat = null, mitStart = true) {
+  return `<div class="chips ivwahl" id="${id}" data-iv="${iv}" style="margin:6px 0 10px">
+    ${INTERVALLE.map(([n, t]) => `<button type="button" class="chip ${n === iv ? 'an' : ''}" data-action="iv-wahl" data-iv="${n}">${t}</button>`).join('')}
+  </div>
+  ${mitStart ? `<div id="${id}-start" ${iv === 1 ? 'hidden' : ''}><div class="label">Nächste Zahlung im</div>
+    ${htmlMonatWahl(`${id}-monat`, startMonat || heute().slice(0, 7))}</div>` : ''}`;
+}
+function intervallLesen(id) {
+  const iv = Number(document.getElementById(id).dataset.iv) || 1;
+  const startBox = document.getElementById(`${id}-monat`);
+  return { intervall: iv, startMonat: iv > 1 && startBox ? monatLesen(`${id}-monat`) : null };
+}
+
+// Monat + Jahr als zwei Auswahllisten (statt des kleinen Browser-Monatsfelds)
+function htmlMonatWahl(id, wert) {
+  const [j, m] = wert.split('-').map(Number);
+  const jetzt = new Date().getFullYear();
+  const jahre = [];
+  for (let y = Math.min(j, jetzt - 1); y <= Math.max(j, jetzt + 10); y++) jahre.push(y);
+  return `<div class="zwei monatwahl" id="${id}">
+    <select data-teil="m">${MONATE.map((n, i) => `<option value="${i + 1}" ${i + 1 === m ? 'selected' : ''}>${n}</option>`).join('')}</select>
+    <select data-teil="j">${jahre.map((y) => `<option ${y === j ? 'selected' : ''}>${y}</option>`).join('')}</select>
+  </div>`;
+}
+function monatLesen(id) {
+  const box = document.getElementById(id);
+  return `${box.querySelector('[data-teil=j]').value}-${String(box.querySelector('[data-teil=m]').value).padStart(2, '0')}`;
 }
 
 /* ---------------------------------------------------------------------
@@ -438,12 +502,14 @@ let aktMonat = heute().slice(0, 7);
 function render() {
   document.querySelectorAll('nav [data-view]').forEach(
     (b) => b.classList.toggle('aktiv', b.dataset.view === ansicht));
-  const mitMonat = ansicht !== 'einstellungen';
-  document.getElementById('titel-text').textContent = mitMonat ? monatName(aktMonat) : 'Einstellungen';
+  const mitMonat = ansicht === 'uebersicht' || ansicht === 'buchungen';
+  document.getElementById('titel-text').textContent = mitMonat ? monatName(aktMonat)
+    : ansicht === 'ausblick' ? 'Ausblick' : 'Einstellungen';
   document.querySelectorAll('.pfeil').forEach((p) => (p.style.visibility = mitMonat ? 'visible' : 'hidden'));
   document.getElementById('inhalt').innerHTML =
     ansicht === 'uebersicht' ? htmlUebersicht()
     : ansicht === 'buchungen' ? htmlBuchungen()
+    : ansicht === 'ausblick' ? htmlAusblick()
     : htmlEinstellungen();
 }
 
@@ -483,7 +549,7 @@ function htmlUebersicht() {
   // Hinweise oben
   const fehlend = fehlendeVorlagen(aktMonat);
   if (fehlend.length) {
-    h += `<button class="hinweis" data-action="vorlagen-uebernehmen">📌 ${fehlend.length} monatliche Buchung${fehlend.length > 1 ? 'en' : ''} für ${monatName(aktMonat)} eintragen
+    h += `<button class="hinweis" data-action="vorlagen-uebernehmen">📌 ${fehlend.length} regelmäßige Buchung${fehlend.length > 1 ? 'en' : ''} für ${monatName(aktMonat)} eintragen
       <div class="klein grau" style="margin-top:4px">${fehlend.map((v) => esc(v.name)).join(' · ')}</div></button>`;
   }
   if (backupFaellig()) {
@@ -600,6 +666,115 @@ function htmlUebersicht() {
   return h;
 }
 
+/* ---------------------------------------------------------------------
+   5b. Ausblick (Prognose)
+   Für jeden kommenden Monat wird zusammengerechnet:
+     + eingetragene Buchungen (auch geplante mit Datum in der Zukunft)
+     + regelmäßige Buchungen, die fällig, aber noch nicht eingetragen sind
+       (Kreditraten nur bis zur letzten Rate)
+     + geschätzte variable Ausgaben (Durchschnitt der letzten 3 Monate)
+   Daraus: was pro Monat frei bleibt und wie sich das Girokonto entwickelt.
+   --------------------------------------------------------------------- */
+
+let ausblickMonate = 12;
+
+// Ø variable Ausgaben (alles, was nicht Fixkosten und nicht aus Vorlagen ist)
+function variablerSchnitt() {
+  const jetzt = heute().slice(0, 7);
+  const werte = [];
+  for (let i = 1; i <= 12 && werte.length < 3; i++) {
+    const liste = buchungenImMonat(monatVerschieben(jetzt, -i)).filter((b) => b.art === 'ausgabe');
+    if (!liste.length) continue;
+    werte.push(liste.filter((b) => !b.vorlageId && !kat(b.kategorieId)?.fix).reduce((s, b) => s + b.betrag, 0));
+  }
+  return { schnitt: werte.length ? Math.round(werte.reduce((s, x) => s + x, 0) / werte.length) : 0, monate: werte.length };
+}
+
+function prognose(anzahl) {
+  const h = heute();
+  const jetzt = h.slice(0, 7);
+  const varSchnitt = variablerSchnitt().schnitt;
+  const konto = kontoInfo();
+  let stand = konto ? konto.stand : null;
+  const monate = [];
+
+  for (let i = 0; i < anzahl; i++) {
+    const m = monatVerschieben(jetzt, i);
+    const r = { monat: m, ein: 0, aus: 0, spar: 0, variabel: 0, ereignisse: [] };
+    const plus = (art, betrag) => { if (art === 'einnahme') r.ein += betrag; else if (art === 'sparen') r.spar += betrag; else r.aus += betrag; };
+    const vz = (art) => (art === 'einnahme' ? '+' : '−');
+
+    for (const b of buchungenImMonat(m)) {
+      plus(b.art, b.betrag);
+      if (b.datum > h && !b.vorlageId) r.ereignisse.push(`⏳ ${esc(b.notiz || kat(b.kategorieId)?.name || 'Geplant')} ${vz(b.art)}${euro(b.betrag)}`);
+    }
+    for (const v of fehlendeVorlagen(m)) {
+      plus(v.art || 'ausgabe', v.betrag);
+      if ((v.intervall || 1) > 1) r.ereignisse.push(`🔁 ${esc(v.name)} ${vz(v.art)}${euro(v.betrag)}`);
+    }
+    // variable Ausgaben: im laufenden Monat nur der Rest, der voraussichtlich noch kommt
+    if (i === 0) {
+      const schon = buchungenImMonat(m).filter((b) => b.art === 'ausgabe' && !b.vorlageId && !kat(b.kategorieId)?.fix && b.datum <= h)
+        .reduce((s, b) => s + b.betrag, 0);
+      r.variabel = Math.max(0, varSchnitt - schon);
+    } else r.variabel = varSchnitt;
+    r.aus += r.variabel;
+    r.frei = r.ein - r.aus - r.spar;
+
+    if (stand !== null) {
+      stand = i === 0 ? konto.ende - r.variabel : stand + r.frei;
+      r.konto = stand;
+    }
+    for (const k of daten.kredite) {
+      const ki = kreditInfo(k);
+      if (ki.raten && ki.ende === m) r.ereignisse.push(`🎉 ${esc(k.name)}: letzte Rate – danach ${euro(k.rate)} mehr pro Monat`);
+    }
+    monate.push(r);
+  }
+  return monate;
+}
+
+function htmlAusblick() {
+  const p = prognose(ausblickMonate);
+  const v = variablerSchnitt();
+  const hatKonto = p[0].konto !== undefined;
+  const letzter = p[p.length - 1];
+  const freiSchnitt = Math.round(p.reduce((s, r) => s + r.frei, 0) / p.length);
+  const max = Math.max(1, ...p.map((r) => Math.abs(hatKonto ? r.konto : r.frei)));
+  // Rücklage für nicht-monatliche Zahlungen (z. B. Versicherung vierteljährlich)
+  const ruecklage = daten.vorlagen.filter((x) => (x.intervall || 1) > 1 && (x.art || 'ausgabe') === 'ausgabe')
+    .reduce((s, x) => s + x.betrag / x.intervall, 0);
+
+  let h = `<div class="segment">${[12, 24, 36].map((n) =>
+    `<button data-action="ausblick-monate" data-n="${n}" class="${n === ausblickMonate ? 'an' : ''}">${n} Monate</button>`).join('')}</div>`;
+
+  h += `<section class="karte">
+    ${hatKonto ? `<div class="label">Girokonto in ${ausblickMonate} Monaten (${monatKurz(letzter.monat)}) voraussichtlich</div>
+      <div class="zahl mittel ${letzter.konto < 0 ? 'rot' : ''}">${euro(letzter.konto)}</div>`
+      : `<div class="klein grau" style="margin-bottom:8px">Trag in der Übersicht deinen Kontostand ein, dann siehst du hier auch, wie sich dein Konto entwickelt.</div>`}
+    <div class="zeile"><span>Ø frei pro Monat</span><b class="${freiSchnitt < 0 ? 'rot' : 'gruen'}">${euro(freiSchnitt)}</b></div>
+    <div class="zeile klein grau" style="margin-top:4px"><span>Variable Ausgaben geschätzt</span><span>${v.monate ? `${euro(v.schnitt)}/Monat (Ø ${v.monate} Mon.)` : 'noch keine Daten'}</span></div>
+    ${ruecklage ? `<div class="zeile klein grau" style="margin-top:4px"><span>Rücklage für Quartals-/Jahreszahlungen</span><span>${euro(Math.round(ruecklage))}/Monat</span></div>` : ''}
+    ${v.monate ? '' : '<div class="klein grau" style="margin-top:6px">Die Schätzung für Essen, Tanken, Freizeit … wird genauer, sobald ein paar Monate eingetragen sind.</div>'}
+  </section>`;
+
+  h += `<section class="karte">` + p.map((r) => {
+    const wert = hatKonto ? r.konto : r.frei;
+    return `<div class="ausblick-monat">
+      <div class="zeile"><b>${monatKurz(r.monat)}</b>
+        <span class="${r.frei < 0 ? 'rot' : 'gruen'}">${r.frei >= 0 ? '+' : ''}${euro(r.frei)} frei</span></div>
+      <div class="leiste" style="height:8px"><span style="width:${(Math.abs(wert) / max) * 100}%;background:${wert < 0 ? 'var(--rot)' : 'var(--blau)'}"></span></div>
+      <div class="zeile klein grau"><span>Ein ${euro(r.ein)} · Aus ${euro(r.aus)}${r.spar ? ` · Spar ${euro(r.spar)}` : ''}</span>
+        ${hatKonto ? `<span class="${r.konto < 0 ? 'rot' : ''}">Konto ${euro(r.konto)}</span>` : ''}</div>
+      ${r.ereignisse.map((e) => `<div class="klein" style="margin-top:3px">${e}</div>`).join('')}
+    </div>`;
+  }).join('') + `</section>`;
+
+  h += `<div class="klein grau" style="padding:0 4px 8px">💡 Bevorstehende Zahlungen (z. B. TÜV, Urlaub, Geschenke) trägst du einfach mit <b>+</b> und einem Datum in der Zukunft ein.
+    Regelmäßige Zahlungen wie Versicherungen legst du unter Einstellungen → Regelmäßige Buchungen an.</div>`;
+  return h;
+}
+
 function htmlBuchungen() {
   const liste = buchungenImMonat(aktMonat).sort((a, b) => b.datum.localeCompare(a.datum));
   if (!liste.length) return `<div class="leer">Keine Buchungen in ${monatName(aktMonat)}.</div>`;
@@ -616,7 +791,7 @@ function htmlBuchungen() {
     const farbe = b.art === 'einnahme' ? 'gruen' : b.art === 'sparen' ? 'blau' : '';
     h += `<button class="buchung" data-action="bearbeiten" data-id="${b.id}">
       <span class="punkt" style="background:${esc(k.farbe)}"></span>
-      <span class="mitte"><div>${esc(k.name)}${b.vorlageId ? ' 📌' : ''}</div>${b.notiz ? `<div class="notiz">${esc(b.notiz)}</div>` : ''}</span>
+      <span class="mitte"><div>${esc(k.name)}${b.vorlageId ? ' 📌' : ''}${b.datum > heute() ? ' <span class="klein blau">⏳ geplant</span>' : ''}</div>${b.notiz ? `<div class="notiz">${esc(b.notiz)}</div>` : ''}</span>
       <span class="betrag ${farbe}">${vorzeichen}${euro(b.betrag)}</span>
     </button>`;
   }
@@ -658,13 +833,13 @@ function htmlEinstellungen() {
     <div class="klein grau">Tipp: Ein Notgroschen von 3–6 Monatsausgaben gilt als solide.</div>
   </section>
 
-  <section class="karte"><h2>📌 Monatliche Buchungen</h2>
-    <div class="klein grau" style="margin-bottom:10px">Für alles, was jeden Monat gleich kommt: Fixkosten, Gehalt, Sparrate.
-      In der Übersicht trägst du sie dann mit einem Tipp für den Monat ein.</div>
+  <section class="karte"><h2>📌 Regelmäßige Buchungen</h2>
+    <div class="klein grau" style="margin-bottom:10px">Für alles, was regelmäßig kommt: Fixkosten, Gehalt, Sparrate –
+      auch vierteljährlich oder jährlich (z. B. Versicherungen). In der Übersicht trägst du sie mit einem Tipp ein, sobald sie fällig sind.</div>
     ${vorlagenSortiert.length ? vorlagenSortiert.map((v) => `
       <div class="katedit">
         <span class="punkt" style="background:${esc(kat(v.kategorieId)?.farbe || '#666')}"></span>
-        <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${vorzeichen[v.art || 'ausgabe']}${euro(v.betrag)} · ${tagText(v.tag)} · ${esc(kat(v.kategorieId)?.name || '?')}</span></span>
+        <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${vorzeichen[v.art || 'ausgabe']}${euro(v.betrag)} · ${(v.intervall || 1) > 1 ? `${intervallName(v.intervall).toLowerCase()}, nächste ${monatKurz(naechsteFaelligkeit(v) || heute().slice(0, 7))} · ` : ''}${tagText(v.tag)} · ${esc(kat(v.kategorieId)?.name || '?')}</span></span>
         <button class="x" data-action="vorlage-bearbeiten" data-id="${v.id}" aria-label="Bearbeiten">✎</button>
         <button class="x" data-action="vorlage-loeschen" data-id="${v.id}" aria-label="Vorlage löschen">✕</button>
       </div>`).join('') : '<div class="klein grau">Noch keine Vorlagen.</div>'}
@@ -678,7 +853,9 @@ function htmlEinstellungen() {
       <label class="feld"><span>Name</span><input type="text" id="v-name" value="${esc(ve?.name || '')}"></label>
       <label class="feld"><span>Betrag (€)</span><input type="text" inputmode="decimal" id="v-betrag" value="${ve ? centZuText(ve.betrag) : ''}"></label>
     </div>
-    <div class="label">Wann im Monat?</div>
+    <div class="label">Wie oft?</div>
+    ${htmlIntervallWahl('v-iv', ve?.intervall || 1, ve?.startMonat)}
+    <div class="label">An welchem Tag?</div>
     ${htmlTagWahl('v-tag', ve?.tag || 1)}
     <label class="feld"><span>Kategorie</span><select id="v-kat">${katOptionen}</select></label>
     ${ve ? `<div class="knopfreihe">
@@ -714,7 +891,7 @@ function htmlEinstellungen() {
         <option value="laufzeit">Ich kenne die Restlaufzeit (letzte Rate)</option></select></label>
       <label class="feld nur-rest"><span>Restschuld heute (€)</span><input type="text" inputmode="decimal" id="kr-rest"></label>
     </div>
-    <label class="feld zeige-ende" hidden><span>Monat der letzten Rate</span><input type="month" id="kr-ende" style="color-scheme:dark"></label>
+    <div class="feld zeige-ende" hidden><span>Monat der letzten Rate</span>${htmlMonatWahl('kr-ende', monatVerschieben(heute().slice(0, 7), 12))}</div>
     <details class="erweitert nur-kredit">
       <summary>Erweiterte Angaben (optional)</summary>
       <div class="klein grau" style="margin:8px 0 12px">Brauchst du normalerweise nicht – deine Rate enthält die Zinsen schon.
@@ -783,18 +960,60 @@ function formOeffnen(buchung) {
       value="${form.betrag != null ? centZuText(form.betrag) : ''}" autocomplete="off">
     <div class="label">Kategorie</div>
     <div class="chips" id="f-kats"></div>
-    <label class="feld"><span>Datum</span><input type="date" id="f-datum" value="${form.datum}"></label>
+    <div class="label">Datum</div>
+    <input type="hidden" id="f-datum" value="${form.datum}">
+    <div class="chips" id="f-datum-wahl" style="margin-bottom:8px"></div>
+    <div id="f-kalender" hidden></div>
     <label class="feld"><span>Notiz (optional)</span><input type="text" id="f-notiz" value="${esc(form.notiz)}" placeholder="z. B. Bäcker, Kino …"></label>
-    ${form.id ? '' : `<label class="check"><input type="checkbox" id="f-wiederkehrend">Jeden Monat wiederholen (als Vorlage merken)</label>
+    ${form.id ? '' : `<label class="check"><input type="checkbox" id="f-wiederkehrend">Regelmäßig wiederholen (als Vorlage merken)</label>
       <div id="f-tag-box" hidden style="margin:-6px 0 14px"></div>`}
     <button class="knopf haupt" data-action="form-speichern">Speichern</button>
     ${form.id ? '<div class="knopfreihe"><button class="knopf gefahr" data-action="form-loeschen">Löschen</button></div>' : ''}
   </div>`;
   formArtSetzen(form.art);
+  datumWahlZeigen();
 
   sheet().hidden = false;
   history.pushState({ formular: true }, ''); // damit die Zurück-Taste das Formular schließt
   if (!form.id) setTimeout(() => document.getElementById('f-betrag').focus(), 60);
+}
+
+// --- Datumsauswahl im Formular: Heute · Gestern · Kalender ---
+function datumWahlZeigen() {
+  const h = heute(), g = tagVerschieben(h, -1), d = form.datum;
+  const anderes = d !== h && d !== g;
+  document.getElementById('f-datum-wahl').innerHTML = `
+    <button type="button" class="chip ${d === h ? 'an' : ''}" data-action="datum-setzen" data-datum="${h}">Heute</button>
+    <button type="button" class="chip ${d === g ? 'an' : ''}" data-action="datum-setzen" data-datum="${g}">Gestern</button>
+    <button type="button" class="chip ${anderes ? 'an' : ''}" data-action="kal-auf">📅 ${anderes ? datumLang(d) : 'Anderes Datum'}</button>
+    ${d > h ? '<div class="klein blau" style="width:100%">⏳ Datum in der Zukunft – zählt als geplante Zahlung</div>' : ''}`;
+}
+function datumSetzen(d) {
+  form.datum = d;
+  document.getElementById('f-datum').value = d;
+  document.getElementById('f-kalender').hidden = true;
+  datumWahlZeigen();
+}
+function kalenderZeigen() {
+  const [j, m] = form.kalMonat.split('-').map(Number);
+  const versatz = (new Date(j, m - 1, 1).getDay() + 6) % 7; // Woche beginnt Montag
+  const tage = new Date(j, m, 0).getDate();
+  const h = heute();
+  let zellen = '<span></span>'.repeat(versatz);
+  for (let t = 1; t <= tage; t++) {
+    const d = `${form.kalMonat}-${String(t).padStart(2, '0')}`;
+    zellen += `<button type="button" class="kal-tag ${d === form.datum ? 'an' : ''} ${d === h ? 'heute' : ''}" data-action="datum-setzen" data-datum="${d}">${t}</button>`;
+  }
+  const box = document.getElementById('f-kalender');
+  box.innerHTML = `<div class="kalender">
+    <div class="zeile" style="margin-bottom:8px">
+      <button type="button" class="kal-pfeil" data-action="kal-monat" data-n="-1" aria-label="Vorheriger Monat">‹</button>
+      <b>${monatName(form.kalMonat)}</b>
+      <button type="button" class="kal-pfeil" data-action="kal-monat" data-n="1" aria-label="Nächster Monat">›</button>
+    </div>
+    <div class="kal-raster">${['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'].map((w) => `<span class="kal-kopf">${w}</span>`).join('')}${zellen}</div>
+  </div>`;
+  box.hidden = false;
 }
 
 // Ausgabe / Einnahme / Sparen umschalten → passende Kategorien anzeigen
@@ -827,11 +1046,13 @@ async function formSpeichern() {
     kategorieId: form.kategorieId, notiz, vorlageId: form.vorlageId || null,
     erstellt: form.erstellt || Date.now() };
 
-  // Häkchen "Jeden Monat" → zusätzlich eine monatliche Vorlage anlegen
+  // Häkchen "Regelmäßig" → zusätzlich eine Vorlage anlegen
   const wiederkehrend = document.getElementById('f-wiederkehrend');
   if (!form.id && wiederkehrend?.checked) {
+    const intervall = intervallLesen('f-iv').intervall;
     const v = { id: neueId(), name: notiz || kat(b.kategorieId).name, betrag, art: form.art,
-      kategorieId: b.kategorieId, tag: tagLesen('f-tag') };
+      kategorieId: b.kategorieId, tag: tagLesen('f-tag'),
+      intervall, startMonat: intervall > 1 ? datum.slice(0, 7) : null }; // Rhythmus startet im Monat dieser Buchung
     await speichern('vorlagen', v);
     b.vorlageId = v.id;
   }
@@ -1216,6 +1437,27 @@ document.addEventListener('click', async (ev) => {
       }
       break;
 
+    case 'ausblick-monate': ausblickMonate = Number(el.dataset.n); render(); break;
+
+    // Rhythmus-Auswahl
+    case 'iv-wahl': {
+      const box = el.closest('.ivwahl');
+      box.dataset.iv = el.dataset.iv;
+      box.querySelectorAll('.chip').forEach((c) => c.classList.toggle('an', c === el));
+      const start = document.getElementById(`${box.id}-start`);
+      if (start) start.hidden = el.dataset.iv === '1';
+      break;
+    }
+
+    // Datumsauswahl
+    case 'datum-setzen': datumSetzen(el.dataset.datum); break;
+    case 'kal-auf': {
+      const box = document.getElementById('f-kalender');
+      if (box.hidden) { form.kalMonat = form.datum.slice(0, 7); kalenderZeigen(); } else box.hidden = true;
+      break;
+    }
+    case 'kal-monat': form.kalMonat = monatVerschieben(form.kalMonat, Number(el.dataset.n)); kalenderZeigen(); break;
+
     // Tagauswahl (1. · 8. · 15. · Letzter · Anderer)
     case 'tag-wahl': {
       const box = el.closest('.tagwahl');
@@ -1249,12 +1491,13 @@ document.addEventListener('click', async (ev) => {
       const tag = tagLesen('v-tag');
       const art = document.getElementById('v-art').value;
       const kategorieId = document.getElementById('v-kat').value;
+      const { intervall, startMonat } = intervallLesen('v-iv');
       if (!name || !betrag || betrag <= 0) return toast('Bitte Name und Betrag eingeben');
       if (!kategorieId) return toast('Bitte eine Kategorie wählen');
       const alt = daten.vorlagen.find((v) => v.id === vorlageInBearbeitung);
       if (alt) {
         // Bearbeiten: vorhandene Vorlage ändern (id und Kredit-Verknüpfung bleiben)
-        await speichern('vorlagen', { ...alt, name, betrag, tag, art, kategorieId });
+        await speichern('vorlagen', { ...alt, name, betrag, tag, art, kategorieId, intervall, startMonat });
         // Schon eingetragene Buchung im aktuellen Monat gleich mit korrigieren?
         const monat = heute().slice(0, 7);
         const gebucht = daten.buchungen.find((b) => b.vorlageId === alt.id && b.datum.startsWith(monat));
@@ -1267,7 +1510,7 @@ document.addEventListener('click', async (ev) => {
         vorlageInBearbeitung = null;
         render(); toast('Änderungen gespeichert ✓');
       } else {
-        await speichern('vorlagen', { id: neueId(), name, betrag, tag, art, kategorieId });
+        await speichern('vorlagen', { id: neueId(), name, betrag, tag, art, kategorieId, intervall, startMonat });
         render(); toast('Vorlage gespeichert ✓');
       }
       break;
@@ -1299,7 +1542,7 @@ document.addEventListener('click', async (ev) => {
           if (!k.restschuld || k.restschuld <= 0) return toast('Bitte die Restschuld eingeben');
         } else {
           // Restlaufzeit bekannt → Restschuld ausrechnen
-          const ende = wert('kr-ende');
+          const ende = monatLesen('kr-ende');
           if (!ende) return toast('Bitte den Monat der letzten Rate wählen');
           const raten = kreditInfo({ typ: 'vertrag', tag, ende, rate }).raten;
           if (!raten) return toast('Die letzte Rate liegt in der Vergangenheit');
@@ -1307,7 +1550,7 @@ document.addEventListener('click', async (ev) => {
           k.geschaetzt = true; // aus der Laufzeit berechnet
         }
       } else {
-        k.ende = wert('kr-ende');
+        k.ende = monatLesen('kr-ende');
         if (!k.ende) return toast('Bitte den Monat der letzten Rate wählen');
       }
       await speichern('kredite', k);
@@ -1402,7 +1645,8 @@ document.addEventListener('change', async (ev) => {
     box.hidden = !el.checked;
     if (el.checked) {
       const datum = document.getElementById('f-datum').value || heute();
-      box.innerHTML = `<div class="label">Wann im Monat?</div>${htmlTagWahl('f-tag', tagAusDatum(datum))}`;
+      box.innerHTML = `<div class="label">Wie oft?</div>${htmlIntervallWahl('f-iv', 1, null, false)}
+        <div class="label">An welchem Tag?</div>${htmlTagWahl('f-tag', tagAusDatum(datum))}`;
     }
     return;
   }

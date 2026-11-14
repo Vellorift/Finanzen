@@ -62,7 +62,7 @@
   .buchung .betrag { font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
 
   /* Navigation unten + runder Plus-Knopf */
-  nav.unten { position:fixed; left:0; right:0; bottom:0; z-index:6; display:grid; grid-template-columns:1fr 1fr 1fr;
+  nav.unten { position:fixed; left:0; right:0; bottom:0; z-index:6; display:grid; grid-template-columns:repeat(4,1fr);
     background:var(--karte); border-top:1px solid var(--rand); padding:6px 6px calc(6px + env(safe-area-inset-bottom)); }
   nav.unten button { background:none; border:0; color:var(--grau); font-size:.75rem; display:flex;
     flex-direction:column; align-items:center; gap:2px; padding:6px 0; }
@@ -120,6 +120,17 @@
   .sync-offline { background:var(--grau); } .sync-fehler { background:var(--rot); }
   @keyframes puls { 50% { opacity:.3; } }
   .knopf:disabled { opacity:.6; }
+  /* Kalender */
+  .kalender { background:var(--karte); border-radius:14px; padding:10px; margin:0 0 14px; }
+  .kal-raster { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+  .kal-kopf { text-align:center; color:var(--grau); font-size:.8rem; padding:4px 0; }
+  .kal-tag { height:44px; border:0; border-radius:10px; background:none; font-size:1.05rem; }
+  .kal-tag.heute { box-shadow:inset 0 0 0 1px var(--blau); }
+  .kal-tag.an { background:var(--blau); color:#0b1a2b; font-weight:700; }
+  .kal-pfeil { background:var(--karte2); border:0; border-radius:12px; width:44px; height:40px; font-size:1.5rem; }
+  .monatwahl { margin:6px 0 4px; }
+  .ausblick-monat { padding:10px 0; border-bottom:1px solid var(--rand); }
+  .ausblick-monat:last-child { border-bottom:0; }
   .bearbeiten-box { border:1px solid var(--blau); border-radius:12px; padding:4px 12px 12px; margin-top:12px; }
   .tagwahl { margin:6px 0 14px; align-items:center; }
   .tagwahl .chip { padding:8px 12px; }
@@ -142,6 +153,7 @@
   <nav class="unten">
     <button data-view="uebersicht"><span>📊</span>Übersicht</button>
     <button data-view="buchungen"><span>📋</span>Buchungen</button>
+    <button data-view="ausblick"><span>📈</span>Ausblick</button>
     <button data-view="einstellungen"><span>⚙️</span>Einstellungen</button>
   </nav>
 
