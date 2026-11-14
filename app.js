@@ -18,7 +18,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -284,7 +284,7 @@ async function vorlagenUebernehmen(m) {
       art: v.art || 'ausgabe', kategorieId: v.kategorieId, notiz: v.name, vorlageId: v.id,
     });
   }
-  toast(`${liste.length} Buchungen eingetragen ✓`);
+  toast(`${liste.length} Buchung${liste.length === 1 ? '' : 'en'} eingetragen ✓`);
 }
 
 /* ---------------------------------------------------------------------
@@ -559,7 +559,9 @@ function htmlBuchungen() {
   return h;
 }
 
-const katOptionenFuer = (art) => kategorienVon(art).map((k) => `<option value="${k.id}">${esc(k.name)}</option>`).join('');
+const katOptionenFuer = (art, gewaehlt) => kategorienVon(art)
+  .map((k) => `<option value="${k.id}" ${k.id === gewaehlt ? 'selected' : ''}>${esc(k.name)}</option>`).join('');
+let vorlageInBearbeitung = null; // id der monatlichen Buchung, die gerade bearbeitet wird
 
 function htmlEinstellungen() {
   const e = daten.einst;
@@ -574,7 +576,11 @@ function htmlEinstellungen() {
       <button class="x" data-action="kat-loeschen" data-id="${k.id}" aria-label="Kategorie löschen">✕</button>
     </div>`).join('');
 
-  const katOptionen = katOptionenFuer('ausgabe');
+  // Formular für monatliche Buchungen: leer (neu) oder mit Werten (bearbeiten)
+  const ve = daten.vorlagen.find((v) => v.id === vorlageInBearbeitung) || null;
+  const veArt = ve?.art || 'ausgabe';
+  const katOptionen = katOptionenFuer(veArt, ve?.kategorieId);
+  const artOption = (wert, text) => `<option value="${wert}" ${wert === veArt ? 'selected' : ''}>${text}</option>`;
   const vorzeichen = { ausgabe: '−', einnahme: '+', sparen: '→ ' };
   const vorlagenSortiert = [...daten.vorlagen].sort((a, b) => a.tag - b.tag);
 
@@ -595,21 +601,27 @@ function htmlEinstellungen() {
       <div class="katedit">
         <span class="punkt" style="background:${esc(kat(v.kategorieId)?.farbe || '#666')}"></span>
         <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${vorzeichen[v.art || 'ausgabe']}${euro(v.betrag)} · ${tagText(v.tag)} · ${esc(kat(v.kategorieId)?.name || '?')}</span></span>
+        <button class="x" data-action="vorlage-bearbeiten" data-id="${v.id}" aria-label="Bearbeiten">✎</button>
         <button class="x" data-action="vorlage-loeschen" data-id="${v.id}" aria-label="Vorlage löschen">✕</button>
       </div>`).join('') : '<div class="klein grau">Noch keine Vorlagen.</div>'}
-    <div class="unter">Neu</div>
+    <div id="v-formular" ${ve ? 'class="bearbeiten-box"' : ''}>
+    <div class="unter">${ve ? `✎ Bearbeiten: ${esc(ve.name)}` : 'Neu'}</div>
     <label class="feld"><span>Art</span><select id="v-art">
-      <option value="ausgabe">Ausgabe (z. B. Miete, Handy, Spotify)</option>
-      <option value="einnahme">Einnahme (z. B. Gehalt)</option>
-      <option value="sparen">Sparen (z. B. Sparrate aufs Zweitkonto)</option></select></label>
+      ${artOption('ausgabe', 'Ausgabe (z. B. Miete, Handy, Spotify)')}
+      ${artOption('einnahme', 'Einnahme (z. B. Gehalt)')}
+      ${artOption('sparen', 'Sparen (z. B. Sparrate aufs Zweitkonto)')}</select></label>
     <div class="zwei">
-      <label class="feld"><span>Name</span><input type="text" id="v-name"></label>
-      <label class="feld"><span>Betrag (€)</span><input type="text" inputmode="decimal" id="v-betrag"></label>
+      <label class="feld"><span>Name</span><input type="text" id="v-name" value="${esc(ve?.name || '')}"></label>
+      <label class="feld"><span>Betrag (€)</span><input type="text" inputmode="decimal" id="v-betrag" value="${ve ? centZuText(ve.betrag) : ''}"></label>
     </div>
     <div class="label">Wann im Monat?</div>
-    ${htmlTagWahl('v-tag', 1)}
+    ${htmlTagWahl('v-tag', ve?.tag || 1)}
     <label class="feld"><span>Kategorie</span><select id="v-kat">${katOptionen}</select></label>
-    <button class="knopf" data-action="vorlage-neu">Vorlage hinzufügen</button>
+    ${ve ? `<div class="knopfreihe">
+        <button class="knopf haupt" data-action="vorlage-neu">Speichern</button>
+        <button class="knopf" data-action="vorlage-abbrechen">Abbrechen</button></div>`
+      : '<button class="knopf" data-action="vorlage-neu">Vorlage hinzufügen</button>'}
+    </div>
   </section>
 
   <section class="karte"><h2>🏦 Kredite & Verträge</h2>
@@ -1110,6 +1122,7 @@ document.addEventListener('click', async (ev) => {
   if (!el) return;
 
   if (el.dataset.view) {
+    if (el.dataset.view !== ansicht) vorlageInBearbeitung = null;
     ansicht = el.dataset.view;
     render();
     window.scrollTo(0, 0);
@@ -1158,10 +1171,36 @@ document.addEventListener('click', async (ev) => {
       const kategorieId = document.getElementById('v-kat').value;
       if (!name || !betrag || betrag <= 0) return toast('Bitte Name und Betrag eingeben');
       if (!kategorieId) return toast('Bitte eine Kategorie wählen');
-      await speichern('vorlagen', { id: neueId(), name, betrag, tag, art, kategorieId });
-      render(); toast('Vorlage gespeichert ✓');
+      const alt = daten.vorlagen.find((v) => v.id === vorlageInBearbeitung);
+      if (alt) {
+        // Bearbeiten: vorhandene Vorlage ändern (id und Kredit-Verknüpfung bleiben)
+        await speichern('vorlagen', { ...alt, name, betrag, tag, art, kategorieId });
+        // Schon eingetragene Buchung im aktuellen Monat gleich mit korrigieren?
+        const monat = heute().slice(0, 7);
+        const gebucht = daten.buchungen.find((b) => b.vorlageId === alt.id && b.datum.startsWith(monat));
+        if (gebucht && confirm(`Für ${monatName(monat)} ist „${alt.name}“ schon eingetragen.\nSoll diese Buchung auch angepasst werden?`)) {
+          const [j, m] = monat.split('-').map(Number);
+          const t = Math.min(tag, new Date(j, m, 0).getDate());
+          await speichern('buchungen', { ...gebucht, betrag, art, kategorieId, notiz: name,
+            datum: `${monat}-${String(t).padStart(2, '0')}` });
+        }
+        vorlageInBearbeitung = null;
+        render(); toast('Änderungen gespeichert ✓');
+      } else {
+        await speichern('vorlagen', { id: neueId(), name, betrag, tag, art, kategorieId });
+        render(); toast('Vorlage gespeichert ✓');
+      }
       break;
     }
+    case 'vorlage-bearbeiten':
+      vorlageInBearbeitung = id;
+      render();
+      document.getElementById('v-formular').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      break;
+    case 'vorlage-abbrechen':
+      vorlageInBearbeitung = null;
+      render();
+      break;
     // Kredite & Verträge
     case 'kredit-neu': {
       const wert = (id) => document.getElementById(id).value;
@@ -1215,7 +1254,9 @@ document.addEventListener('click', async (ev) => {
 
     case 'vorlage-loeschen':
       if (confirm('Vorlage löschen? (Bereits eingetragene Buchungen bleiben erhalten.)')) {
-        await loeschen('vorlagen', id); render();
+        await loeschen('vorlagen', id);
+        if (vorlageInBearbeitung === id) vorlageInBearbeitung = null;
+        render();
       }
       break;
 
