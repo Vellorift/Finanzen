@@ -17,7 +17,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -250,7 +250,7 @@ function kleineAusgaben(m) {
   return { summe, anzahl, mehrfach };
 }
 
-// Fixkosten-Vorlagen, die im Monat noch nicht eingetragen sind
+// Monatliche Vorlagen (Fixkosten, Gehalt, Sparrate), die im Monat noch nicht eingetragen sind
 const fehlendeVorlagen = (m) => daten.vorlagen.filter((v) => {
   if (v.kreditId) { // Rate eines Kredits: nach der letzten Rate nicht mehr vorschlagen
     const k = daten.kredite.find((x) => x.id === v.kreditId);
@@ -267,10 +267,39 @@ async function vorlagenUebernehmen(m) {
     const tag = Math.min(v.tag || 1, tageImMonat);
     await speichern('buchungen', {
       id: neueId(), datum: `${m}-${String(tag).padStart(2, '0')}`, betrag: v.betrag,
-      art: 'ausgabe', kategorieId: v.kategorieId, notiz: v.name, vorlageId: v.id,
+      art: v.art || 'ausgabe', kategorieId: v.kategorieId, notiz: v.name, vorlageId: v.id,
     });
   }
-  toast(`${liste.length} Fixkosten eingetragen ✓`);
+  toast(`${liste.length} Buchungen eingetragen ✓`);
+}
+
+/* ---------------------------------------------------------------------
+   4a. Tagauswahl für Monatliches (1. · 8. · 15. · Letzter · Anderer)
+   Tag 31 bedeutet "Monatsletzter": In kürzeren Monaten wird automatisch
+   der letzte Tag genommen (30., 28. oder 29.).
+   --------------------------------------------------------------------- */
+
+const STANDARD_TAGE = [[1, '1.'], [8, '8.'], [15, '15.'], [31, 'Letzter']];
+const tagText = (t) => (t >= 31 ? 'Monatsletzter' : `am ${t}.`);
+
+function htmlTagWahl(id, tag = 1) {
+  const standard = STANDARD_TAGE.some(([t]) => t === tag);
+  return `<div class="tagwahl chips" id="${id}" data-tag="${tag}">
+    ${STANDARD_TAGE.map(([t, text]) => `<button type="button" class="chip ${t === tag ? 'an' : ''}" data-action="tag-wahl" data-tag="${t}">${text}</button>`).join('')}
+    <button type="button" class="chip ${standard ? '' : 'an'}" data-action="tag-wahl" data-tag="anderer">Anderer</button>
+    <input type="number" min="1" max="31" class="tag-eingabe" placeholder="Tag" value="${standard ? '' : tag}" ${standard ? 'hidden' : ''}>
+  </div>`;
+}
+function tagLesen(id) {
+  const box = document.getElementById(id);
+  const feld = box.querySelector('.tag-eingabe');
+  const t = feld.hidden ? Number(box.dataset.tag) : Number(feld.value);
+  return Math.min(Math.max(Math.round(t) || 1, 1), 31);
+}
+// Aus einem Datum den passenden Tag machen (letzter Tag des Monats → 31)
+function tagAusDatum(datum) {
+  const [j, m, t] = datum.split('-').map(Number);
+  return t === new Date(j, m, 0).getDate() ? 31 : t;
 }
 
 /* ---------------------------------------------------------------------
@@ -379,8 +408,8 @@ function htmlUebersicht() {
   // Hinweise oben
   const fehlend = fehlendeVorlagen(aktMonat);
   if (fehlend.length) {
-    const summe = fehlend.reduce((s, v) => s + v.betrag, 0);
-    h += `<button class="hinweis" data-action="vorlagen-uebernehmen">📌 ${fehlend.length} Fixkosten für ${monatName(aktMonat)} eintragen (${euro(summe)})</button>`;
+    h += `<button class="hinweis" data-action="vorlagen-uebernehmen">📌 ${fehlend.length} monatliche Buchung${fehlend.length > 1 ? 'en' : ''} für ${monatName(aktMonat)} eintragen
+      <div class="klein grau" style="margin-top:4px">${fehlend.map((v) => esc(v.name)).join(' · ')}</div></button>`;
   }
   if (backupFaellig()) {
     h += `<button class="hinweis warn" data-action="export">💾 Backup ist über 30 Tage alt (oder noch nie gemacht). Jetzt sichern</button>`;
@@ -516,6 +545,8 @@ function htmlBuchungen() {
   return h;
 }
 
+const katOptionenFuer = (art) => kategorienVon(art).map((k) => `<option value="${k.id}">${esc(k.name)}</option>`).join('');
+
 function htmlEinstellungen() {
   const e = daten.einst;
   const euroFeld = (feld, wert) =>
@@ -529,7 +560,9 @@ function htmlEinstellungen() {
       <button class="x" data-action="kat-loeschen" data-id="${k.id}" aria-label="Kategorie löschen">✕</button>
     </div>`).join('');
 
-  const katOptionen = kategorienVon('ausgabe').map((k) => `<option value="${k.id}">${esc(k.name)}</option>`).join('');
+  const katOptionen = katOptionenFuer('ausgabe');
+  const vorzeichen = { ausgabe: '−', einnahme: '+', sparen: '→ ' };
+  const vorlagenSortiert = [...daten.vorlagen].sort((a, b) => a.tag - b.tag);
 
   return `
   <section class="karte"><h2>💰 Puffer & Sparziel</h2>
@@ -541,20 +574,26 @@ function htmlEinstellungen() {
     <div class="klein grau">Tipp: Ein Notgroschen von 3–6 Monatsausgaben gilt als solide.</div>
   </section>
 
-  <section class="karte"><h2>📌 Fixkosten-Vorlagen</h2>
-    <div class="klein grau" style="margin-bottom:10px">Vorlagen trägst du jeden Monat mit einem Tipp in der Übersicht ein.</div>
-    ${daten.vorlagen.length ? daten.vorlagen.map((v) => `
+  <section class="karte"><h2>📌 Monatliche Buchungen</h2>
+    <div class="klein grau" style="margin-bottom:10px">Für alles, was jeden Monat gleich kommt: Fixkosten, Gehalt, Sparrate.
+      In der Übersicht trägst du sie dann mit einem Tipp für den Monat ein.</div>
+    ${vorlagenSortiert.length ? vorlagenSortiert.map((v) => `
       <div class="katedit">
         <span class="punkt" style="background:${esc(kat(v.kategorieId)?.farbe || '#666')}"></span>
-        <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${euro(v.betrag)} · am ${v.tag}. · ${esc(kat(v.kategorieId)?.name || '?')}</span></span>
+        <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${vorzeichen[v.art || 'ausgabe']}${euro(v.betrag)} · ${tagText(v.tag)} · ${esc(kat(v.kategorieId)?.name || '?')}</span></span>
         <button class="x" data-action="vorlage-loeschen" data-id="${v.id}" aria-label="Vorlage löschen">✕</button>
       </div>`).join('') : '<div class="klein grau">Noch keine Vorlagen.</div>'}
-    <div class="unter">Neue Vorlage</div>
-    <label class="feld"><span>Name (z. B. Miete, Leasing, Spotify)</span><input type="text" id="v-name"></label>
+    <div class="unter">Neu</div>
+    <label class="feld"><span>Art</span><select id="v-art">
+      <option value="ausgabe">Ausgabe (z. B. Miete, Handy, Spotify)</option>
+      <option value="einnahme">Einnahme (z. B. Gehalt)</option>
+      <option value="sparen">Sparen (z. B. Sparrate aufs Zweitkonto)</option></select></label>
     <div class="zwei">
+      <label class="feld"><span>Name</span><input type="text" id="v-name"></label>
       <label class="feld"><span>Betrag (€)</span><input type="text" inputmode="decimal" id="v-betrag"></label>
-      <label class="feld"><span>Tag im Monat</span><input type="number" min="1" max="31" id="v-tag" value="1"></label>
     </div>
+    <div class="label">Wann im Monat?</div>
+    ${htmlTagWahl('v-tag', 1)}
     <label class="feld"><span>Kategorie</span><select id="v-kat">${katOptionen}</select></label>
     <button class="knopf" data-action="vorlage-neu">Vorlage hinzufügen</button>
   </section>
@@ -576,10 +615,9 @@ function htmlEinstellungen() {
       <option value="kredit">Kredit / Ratenkauf</option>
       <option value="vertrag">Leasing / Vertrag (ohne Restschuld)</option></select></label>
     <label class="feld"><span>Name (z. B. Autokredit, Handy-Ratenkauf, Leasing)</span><input type="text" id="kr-name"></label>
-    <div class="zwei">
-      <label class="feld"><span>Monatliche Rate (€)</span><input type="text" inputmode="decimal" id="kr-rate"></label>
-      <label class="feld"><span>Abbuchung am Tag</span><input type="number" min="1" max="31" id="kr-tag" value="1"></label>
-    </div>
+    <label class="feld"><span>Monatliche Rate (€)</span><input type="text" inputmode="decimal" id="kr-rate"></label>
+    <div class="label">Abbuchung am</div>
+    ${htmlTagWahl('kr-tag', 1)}
     <div class="nur-kredit">
       <label class="feld"><span>Was weißt du?</span><select id="kr-bekannt">
         <option value="rest">Ich kenne die Restschuld</option>
@@ -594,7 +632,7 @@ function htmlEinstellungen() {
       <label class="feld"><span>Zinssatz % (im Vertrag „Sollzins“)</span><input type="text" inputmode="decimal" id="kr-zins" placeholder="z. B. 5,9"></label>
       <label class="feld"><span>Ursprünglicher Kreditbetrag (€) – für einen Fortschrittsbalken</span><input type="text" inputmode="decimal" id="kr-ursprung"></label>
     </details>
-    <label class="check"><input type="checkbox" id="kr-vorlage" checked>Rate als Fixkosten-Vorlage anlegen (Häkchen weg, wenn du sie schon als Vorlage hast)</label>
+    <label class="check"><input type="checkbox" id="kr-vorlage" checked>Rate als monatliche Buchung anlegen (Häkchen weg, wenn du sie schon als Vorlage hast)</label>
     <button class="knopf" data-action="kredit-neu">Hinzufügen</button>
   </section>
 
@@ -655,7 +693,8 @@ function formOeffnen(buchung) {
     <div class="chips" id="f-kats"></div>
     <label class="feld"><span>Datum</span><input type="date" id="f-datum" value="${form.datum}"></label>
     <label class="feld"><span>Notiz (optional)</span><input type="text" id="f-notiz" value="${esc(form.notiz)}" placeholder="z. B. Bäcker, Kino …"></label>
-    ${form.id ? '' : `<label class="check" id="f-wiederkehrend-zeile"><input type="checkbox" id="f-wiederkehrend">Jeden Monat (als Fixkosten-Vorlage merken)</label>`}
+    ${form.id ? '' : `<label class="check"><input type="checkbox" id="f-wiederkehrend">Jeden Monat wiederholen (als Vorlage merken)</label>
+      <div id="f-tag-box" hidden style="margin:-6px 0 14px"></div>`}
     <button class="knopf haupt" data-action="form-speichern">Speichern</button>
     ${form.id ? '<div class="knopfreihe"><button class="knopf gefahr" data-action="form-loeschen">Löschen</button></div>' : ''}
   </div>`;
@@ -676,8 +715,6 @@ function formArtSetzen(art) {
   document.getElementById('f-kats').innerHTML = kats.map((k) =>
     `<button class="chip ${k.id === form.kategorieId ? 'an' : ''}" data-action="f-kat" data-id="${k.id}">
       <span class="punkt" style="background:${esc(k.farbe)}"></span>${esc(k.name)}</button>`).join('');
-  const w = document.getElementById('f-wiederkehrend-zeile');
-  if (w) w.hidden = art !== 'ausgabe';
 }
 
 function formSchliessen(durchZurueckTaste) {
@@ -697,11 +734,11 @@ async function formSpeichern() {
   const b = { id: form.id || neueId(), datum, betrag, art: form.art,
     kategorieId: form.kategorieId, notiz, vorlageId: form.vorlageId || null };
 
-  // Häkchen "Jeden Monat" → zusätzlich eine Fixkosten-Vorlage anlegen
+  // Häkchen "Jeden Monat" → zusätzlich eine monatliche Vorlage anlegen
   const wiederkehrend = document.getElementById('f-wiederkehrend');
-  if (!form.id && form.art === 'ausgabe' && wiederkehrend?.checked) {
-    const v = { id: neueId(), name: notiz || kat(b.kategorieId).name, betrag,
-      kategorieId: b.kategorieId, tag: Number(datum.slice(8, 10)) };
+  if (!form.id && wiederkehrend?.checked) {
+    const v = { id: neueId(), name: notiz || kat(b.kategorieId).name, betrag, art: form.art,
+      kategorieId: b.kategorieId, tag: tagLesen('f-tag') };
     await speichern('vorlagen', v);
     b.vorlageId = v.id;
   }
@@ -817,15 +854,27 @@ document.addEventListener('click', async (ev) => {
       }
       break;
 
-    // Fixkosten
+    // Tagauswahl (1. · 8. · 15. · Letzter · Anderer)
+    case 'tag-wahl': {
+      const box = el.closest('.tagwahl');
+      const feld = box.querySelector('.tag-eingabe');
+      box.querySelectorAll('.chip').forEach((c) => c.classList.toggle('an', c === el));
+      if (el.dataset.tag === 'anderer') { feld.hidden = false; feld.focus(); }
+      else { feld.hidden = true; box.dataset.tag = el.dataset.tag; }
+      break;
+    }
+
+    // Monatliche Vorlagen
     case 'vorlagen-uebernehmen': await vorlagenUebernehmen(aktMonat); render(); break;
     case 'vorlage-neu': {
       const name = document.getElementById('v-name').value.trim();
       const betrag = centAusText(document.getElementById('v-betrag').value);
-      const tag = Math.min(Math.max(Number(document.getElementById('v-tag').value) || 1, 1), 31);
+      const tag = tagLesen('v-tag');
+      const art = document.getElementById('v-art').value;
       const kategorieId = document.getElementById('v-kat').value;
       if (!name || !betrag || betrag <= 0) return toast('Bitte Name und Betrag eingeben');
-      await speichern('vorlagen', { id: neueId(), name, betrag, tag, kategorieId });
+      if (!kategorieId) return toast('Bitte eine Kategorie wählen');
+      await speichern('vorlagen', { id: neueId(), name, betrag, tag, art, kategorieId });
       render(); toast('Vorlage gespeichert ✓');
       break;
     }
@@ -835,7 +884,7 @@ document.addEventListener('click', async (ev) => {
       const typ = wert('kr-typ');
       const name = wert('kr-name').trim();
       const rate = centAusText(wert('kr-rate'));
-      const tag = Math.min(Math.max(Number(wert('kr-tag')) || 1, 1), 31);
+      const tag = tagLesen('kr-tag');
       if (!name || !rate || rate <= 0) return toast('Bitte Name und Rate eingeben');
       const k = { id: neueId(), typ, name, rate, tag };
       if (typ === 'kredit') {
@@ -873,7 +922,7 @@ document.addEventListener('click', async (ev) => {
       break;
     }
     case 'kredit-loeschen':
-      if (confirm('Kredit/Vertrag löschen? Die zugehörige Fixkosten-Vorlage wird mitgelöscht, bereits eingetragene Buchungen bleiben.')) {
+      if (confirm('Kredit/Vertrag löschen? Die zugehörige monatliche Buchung (Vorlage) wird mitgelöscht, bereits eingetragene Buchungen bleiben.')) {
         await loeschen('kredite', id);
         for (const v of daten.vorlagen.filter((v) => v.kreditId === id)) await loeschen('vorlagen', v.id);
         render();
@@ -933,6 +982,18 @@ document.addEventListener('change', async (ev) => {
     await einstSpeichern();
     if (el.type === 'checkbox') render();
     toast('Gespeichert ✓');
+    return;
+  }
+
+  if (el.id === 'v-art') { document.getElementById('v-kat').innerHTML = katOptionenFuer(el.value); return; }
+
+  if (el.id === 'f-wiederkehrend') {
+    const box = document.getElementById('f-tag-box');
+    box.hidden = !el.checked;
+    if (el.checked) {
+      const datum = document.getElementById('f-datum').value || heute();
+      box.innerHTML = `<div class="label">Wann im Monat?</div>${htmlTagWahl('f-tag', tagAusDatum(datum))}`;
+    }
     return;
   }
 
