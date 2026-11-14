@@ -17,7 +17,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -323,6 +323,15 @@ function kreditInfo(k) {
   return { restschuld, raten, ende, zinsen, offen: restschuld + zinsen };
 }
 
+// Restschuld aus Rate, Anzahl Raten und Zinssatz (Barwert einer Annuität):
+//   Restschuld = Rate × (1 − (1 + i)^−n) / i     mit i = Zinssatz pro Monat
+// Ohne Zinsen ist es einfach Rate × Anzahl Raten.
+function restschuldAusLaufzeit(rate, raten, zinsProzent) {
+  const i = zinsProzent / 100 / 12;
+  const wert = i > 0 ? rate * (1 - Math.pow(1 + i, -raten)) / i : rate * raten;
+  return Math.floor(wert); // abrunden, damit genau "raten" Raten herauskommen
+}
+
 // "noch 17 Raten · letzte im März 2028"
 function laufzeitText(i) {
   if (i.endlos) return '<span class="rot">Rate deckt nicht einmal die Zinsen!</span>';
@@ -462,7 +471,7 @@ function htmlUebersicht() {
         return `<div class="katzeile" style="margin-top:14px">
           <div class="zeile"><b>${esc(k.name)}</b><span>${euro(k.rate)}/Monat</span></div>
           <div class="klein grau">${k.typ === 'kredit'
-            ? `Restschuld ${euro(i.restschuld)}${k.zins ? ` · ${String(k.zins).replace('.', ',')} % Zins` : ''}${i.zinsen ? ` · noch ${euro(i.zinsen)} Zinsen` : ''}`
+            ? `Restschuld ${k.geschaetzt ? 'ca. ' : ''}${euro(i.restschuld)}${k.zins ? ` · ${String(k.zins).replace('.', ',')} % Zins` : ''}${i.zinsen ? ` · noch ${euro(i.zinsen)} Zinsen` : ''}`
             : `noch offen ${euro(i.offen)}`}</div>
           ${anteil !== null ? `<div class="leiste"><span style="width:${anteil * 100}%;background:var(--gruen)"></span></div><div class="klein grau">${prozent(anteil)} getilgt</div>` : ''}
           <div class="klein">${laufzeitText(i)}</div>
@@ -563,21 +572,25 @@ function htmlEinstellungen() {
     }).join('') : '<div class="klein grau" style="margin-bottom:10px">Noch keine Kredite oder Verträge.</div>'}
     <div class="unter">Neu hinzufügen</div>
     <label class="feld"><span>Art</span><select id="kr-typ">
-      <option value="kredit">Kredit / Ratenkauf (Restschuld bekannt)</option>
-      <option value="vertrag">Leasing / Vertrag (Enddatum bekannt)</option></select></label>
+      <option value="kredit">Kredit / Ratenkauf</option>
+      <option value="vertrag">Leasing / Vertrag (ohne Restschuld)</option></select></label>
     <label class="feld"><span>Name (z. B. Autokredit, Handy-Ratenkauf, Leasing)</span><input type="text" id="kr-name"></label>
     <div class="zwei">
       <label class="feld"><span>Monatliche Rate (€)</span><input type="text" inputmode="decimal" id="kr-rate"></label>
       <label class="feld"><span>Abbuchung am Tag</span><input type="number" min="1" max="31" id="kr-tag" value="1"></label>
     </div>
     <div class="nur-kredit">
-      <div class="zwei">
-        <label class="feld"><span>Restschuld heute (€)</span><input type="text" inputmode="decimal" id="kr-rest"></label>
-        <label class="feld"><span>Zinssatz % (sonst 0)</span><input type="text" inputmode="decimal" id="kr-zins" placeholder="z. B. 5,9"></label>
-      </div>
+      <label class="feld"><span>Was weißt du?</span><select id="kr-bekannt">
+        <option value="rest">Ich kenne die Restschuld</option>
+        <option value="laufzeit">Ich kenne die Restlaufzeit (letzte Rate)</option></select></label>
+      <label class="feld nur-rest"><span>Restschuld heute (€)</span><input type="text" inputmode="decimal" id="kr-rest"></label>
+    </div>
+    <label class="feld zeige-ende" hidden><span>Monat der letzten Rate</span><input type="month" id="kr-ende" style="color-scheme:dark"></label>
+    <div class="nur-kredit">
+      <label class="feld"><span>Zinssatz % (optional, steht im Vertrag als „Sollzins“)</span><input type="text" inputmode="decimal" id="kr-zins" placeholder="z. B. 5,9"></label>
+      <div class="klein grau" style="margin:-6px 0 12px">Ohne Zinssatz rechnet die App mit 0 %. Kennst du nur die Laufzeit, ist die Restschuld dann etwas zu hoch geschätzt – du kannst sie später jederzeit korrigieren.</div>
       <label class="feld"><span>Ursprünglicher Kreditbetrag (€, optional – für Fortschrittsbalken)</span><input type="text" inputmode="decimal" id="kr-ursprung"></label>
     </div>
-    <label class="feld nur-vertrag" hidden><span>Monat der letzten Rate</span><input type="month" id="kr-ende" style="color-scheme:dark"></label>
     <label class="check"><input type="checkbox" id="kr-vorlage" checked>Rate als Fixkosten-Vorlage anlegen (Häkchen weg, wenn du sie schon als Vorlage hast)</label>
     <button class="knopf" data-action="kredit-neu">Hinzufügen</button>
   </section>
@@ -823,11 +836,21 @@ document.addEventListener('click', async (ev) => {
       if (!name || !rate || rate <= 0) return toast('Bitte Name und Rate eingeben');
       const k = { id: neueId(), typ, name, rate, tag };
       if (typ === 'kredit') {
-        k.restschuld = centAusText(wert('kr-rest'));
-        if (!k.restschuld || k.restschuld <= 0) return toast('Bitte die Restschuld eingeben');
         k.zins = Number((wert('kr-zins') || '0').replace(',', '.')) || 0;
         k.ursprung = centAusText(wert('kr-ursprung')) || null;
         k.stichtag = heute();
+        if (wert('kr-bekannt') === 'rest') {
+          k.restschuld = centAusText(wert('kr-rest'));
+          if (!k.restschuld || k.restschuld <= 0) return toast('Bitte die Restschuld eingeben');
+        } else {
+          // Restlaufzeit bekannt → Restschuld ausrechnen
+          const ende = wert('kr-ende');
+          if (!ende) return toast('Bitte den Monat der letzten Rate wählen');
+          const raten = kreditInfo({ typ: 'vertrag', tag, ende, rate }).raten;
+          if (!raten) return toast('Die letzte Rate liegt in der Vergangenheit');
+          k.restschuld = restschuldAusLaufzeit(rate, raten, k.zins);
+          k.geschaetzt = true; // aus der Laufzeit berechnet
+        }
       } else {
         k.ende = wert('kr-ende');
         if (!k.ende) return toast('Bitte den Monat der letzten Rate wählen');
@@ -910,9 +933,12 @@ document.addEventListener('change', async (ev) => {
     return;
   }
 
-  if (el.id === 'kr-typ') { // passende Felder ein-/ausblenden
-    document.querySelectorAll('.nur-kredit').forEach((x) => (x.hidden = el.value !== 'kredit'));
-    document.querySelectorAll('.nur-vertrag').forEach((x) => (x.hidden = el.value !== 'vertrag'));
+  if (el.id === 'kr-typ' || el.id === 'kr-bekannt') { // passende Felder ein-/ausblenden
+    const kredit = document.getElementById('kr-typ').value === 'kredit';
+    const laufzeit = document.getElementById('kr-bekannt').value === 'laufzeit';
+    document.querySelectorAll('.nur-kredit').forEach((x) => (x.hidden = !kredit));
+    document.querySelectorAll('.nur-rest').forEach((x) => (x.hidden = !kredit || laufzeit));
+    document.querySelectorAll('.zeige-ende').forEach((x) => (x.hidden = kredit && !laufzeit));
     return;
   }
 
@@ -921,6 +947,7 @@ document.addEventListener('change', async (ev) => {
     const cent = centAusText(el.value);
     if (cent === null || cent < 0) return toast('Ungültiger Betrag');
     k.restschuld = cent;
+    k.geschaetzt = false; // jetzt ein echter Wert
     k.stichtag = heute(); // ab heute neu rechnen
     await speichern('kredite', k);
     render(); toast('Restschuld aktualisiert ✓');
