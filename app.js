@@ -17,7 +17,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -471,7 +471,8 @@ function htmlUebersicht() {
         return `<div class="katzeile" style="margin-top:14px">
           <div class="zeile"><b>${esc(k.name)}</b><span>${euro(k.rate)}/Monat</span></div>
           <div class="klein grau">${k.typ === 'kredit'
-            ? `Restschuld ${k.geschaetzt ? 'ca. ' : ''}${euro(i.restschuld)}${k.zins ? ` · ${String(k.zins).replace('.', ',')} % Zins` : ''}${i.zinsen ? ` · noch ${euro(i.zinsen)} Zinsen` : ''}`
+            ? (k.geschaetzt && !k.zins ? `Noch zu zahlen ${euro(i.restschuld)}` : `Restschuld ${k.geschaetzt ? 'ca. ' : ''}${euro(i.restschuld)}`)
+            + `${k.zins ? ` · ${String(k.zins).replace('.', ',')} % Zins` : ''}${i.zinsen ? ` · noch ${euro(i.zinsen)} Zinsen` : ''}`
             : `noch offen ${euro(i.offen)}`}</div>
           ${anteil !== null ? `<div class="leiste"><span style="width:${anteil * 100}%;background:var(--gruen)"></span></div><div class="klein grau">${prozent(anteil)} getilgt</div>` : ''}
           <div class="klein">${laufzeitText(i)}</div>
@@ -586,11 +587,13 @@ function htmlEinstellungen() {
       <label class="feld nur-rest"><span>Restschuld heute (€)</span><input type="text" inputmode="decimal" id="kr-rest"></label>
     </div>
     <label class="feld zeige-ende" hidden><span>Monat der letzten Rate</span><input type="month" id="kr-ende" style="color-scheme:dark"></label>
-    <div class="nur-kredit">
-      <label class="feld"><span>Zinssatz % (optional, steht im Vertrag als „Sollzins“)</span><input type="text" inputmode="decimal" id="kr-zins" placeholder="z. B. 5,9"></label>
-      <div class="klein grau" style="margin:-6px 0 12px">Ohne Zinssatz rechnet die App mit 0 %. Kennst du nur die Laufzeit, ist die Restschuld dann etwas zu hoch geschätzt – du kannst sie später jederzeit korrigieren.</div>
-      <label class="feld"><span>Ursprünglicher Kreditbetrag (€, optional – für Fortschrittsbalken)</span><input type="text" inputmode="decimal" id="kr-ursprung"></label>
-    </div>
+    <details class="erweitert nur-kredit">
+      <summary>Erweiterte Angaben (optional)</summary>
+      <div class="klein grau" style="margin:8px 0 12px">Brauchst du normalerweise nicht – deine Rate enthält die Zinsen schon.
+        Mit dem Zinssatz kann die App zusätzlich ausrechnen, wie viel davon Zinsen sind und wie hoch die echte Restschuld ist (z. B. für eine Sondertilgung).</div>
+      <label class="feld"><span>Zinssatz % (im Vertrag „Sollzins“)</span><input type="text" inputmode="decimal" id="kr-zins" placeholder="z. B. 5,9"></label>
+      <label class="feld"><span>Ursprünglicher Kreditbetrag (€) – für einen Fortschrittsbalken</span><input type="text" inputmode="decimal" id="kr-ursprung"></label>
+    </details>
     <label class="check"><input type="checkbox" id="kr-vorlage" checked>Rate als Fixkosten-Vorlage anlegen (Häkchen weg, wenn du sie schon als Vorlage hast)</label>
     <button class="knopf" data-action="kredit-neu">Hinzufügen</button>
   </section>
