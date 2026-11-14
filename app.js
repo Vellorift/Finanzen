@@ -18,7 +18,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -192,6 +192,9 @@ const STANDARD_EINST = {
   zielStand: 0,            // eigener Stand, falls zielGleichPuffer = false
   kleinGrenze: 1000,       // "kleine Ausgaben" = bis 10,00 €
   letztesBackup: null,
+  kontoStand: null,        // Girokonto: zuletzt eingetragener echter Stand (Cent)
+  kontoStichtag: null,     // an welchem Tag eingetragen ("2026-11-14")
+  kontoZeit: 0,            // genauer Zeitpunkt (ms), für Buchungen am selben Tag
 };
 
 async function startdatenAnlegen() {
@@ -280,11 +283,43 @@ async function vorlagenUebernehmen(m) {
   for (const v of liste) {
     const tag = Math.min(v.tag || 1, tageImMonat);
     await speichern('buchungen', {
-      id: neueId(), datum: `${m}-${String(tag).padStart(2, '0')}`, betrag: v.betrag,
+      id: neueId(), erstellt: Date.now(), datum: `${m}-${String(tag).padStart(2, '0')}`, betrag: v.betrag,
       art: v.art || 'ausgabe', kategorieId: v.kategorieId, notiz: v.name, vorlageId: v.id,
     });
   }
   toast(`${liste.length} Buchung${liste.length === 1 ? '' : 'en'} eingetragen ✓`);
+}
+
+/* ---------------------------------------------------------------------
+   4c. Girokonto
+   Du trägst ab und zu den echten Stand ein. Danach rechnet die App selbst:
+   + Einnahmen, − Ausgaben, − Sparen (geht ja vom Girokonto weg).
+   Gezählt werden nur Buchungen NACH dem Eintragen des Kontostands
+   (spätere Tage, oder am selben Tag später angelegt).
+   --------------------------------------------------------------------- */
+
+function kontoInfo() {
+  const e = daten.einst;
+  if (e.kontoStand == null) return null;
+  const h = heute();
+  const zaehlt = (b) => b.datum > e.kontoStichtag || (b.datum === e.kontoStichtag && (b.erstellt || 0) > e.kontoZeit);
+  const wirkung = (art, betrag) => (art === 'einnahme' ? betrag : -betrag);
+
+  let stand = e.kontoStand;
+  for (const b of daten.buchungen) if (zaehlt(b) && b.datum <= h) stand += wirkung(b.art, b.betrag);
+
+  // Vorschau Monatsende: schon eingetragene Buchungen mit späterem Datum
+  // + monatliche Buchungen, die diesen Monat noch kommen
+  const monat = h.slice(0, 7);
+  let ende = stand;
+  for (const b of buchungenImMonat(monat)) if (b.datum > h && zaehlt(b)) ende += wirkung(b.art, b.betrag);
+  const heuteTag = Number(h.slice(8, 10));
+  const [j, m] = monat.split('-').map(Number);
+  const tageImMonat = new Date(j, m, 0).getDate();
+  for (const v of fehlendeVorlagen(monat)) {
+    if (Math.min(v.tag, tageImMonat) > heuteTag) ende += wirkung(v.art || 'ausgabe', v.betrag);
+  }
+  return { stand, ende };
 }
 
 /* ---------------------------------------------------------------------
@@ -414,6 +449,32 @@ function render() {
 
 const prozent = (x) => (x * 100).toLocaleString('de-DE', { maximumFractionDigits: 0 }) + ' %';
 
+let kontoBearbeiten = false;
+function htmlKonto() {
+  const e = daten.einst;
+  const k = kontoInfo();
+  if (kontoBearbeiten || !k) {
+    return `<section class="karte">
+      <div class="label">🏦 Girokonto – aktueller Stand laut Banking-App (€)</div>
+      <input type="text" inputmode="decimal" id="konto-eingabe" style="margin:8px 0" placeholder="z. B. 1.234,56"
+        value="${k ? centZuText(k.stand) : ''}">
+      <div class="knopfreihe" style="margin-top:0">
+        <button class="knopf haupt" data-action="konto-speichern">Speichern</button>
+        ${k ? '<button class="knopf" data-action="konto-abbrechen">Abbrechen</button>' : ''}
+      </div>
+      ${k ? '' : '<div class="klein grau" style="margin-top:8px">Danach rechnet die App mit deinen Buchungen selbst weiter.</div>'}
+    </section>`;
+  }
+  const seit = new Date(e.kontoStichtag).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+  return `<section class="karte">
+    <div class="zeile"><span class="label">🏦 Girokonto heute</span>
+      <button class="x" data-action="konto-bearbeiten" aria-label="Kontostand abgleichen">✎</button></div>
+    <div class="zahl mittel ${k.stand < 0 ? 'rot' : ''}" style="margin-top:-4px">${euro(k.stand)}</div>
+    ${k.ende !== k.stand ? `<div>Monatsende voraussichtlich <b class="${k.ende < 0 ? 'rot' : ''}">${euro(k.ende)}</b></div>` : ''}
+    <div class="klein grau" style="margin-top:4px">Mit der Bank abgeglichen am ${seit} · seitdem eingetragene Buchungen sind eingerechnet</div>
+  </section>`;
+}
+
 function htmlUebersicht() {
   const z = monatsZahlen(aktMonat);
   const e = daten.einst;
@@ -428,6 +489,9 @@ function htmlUebersicht() {
   if (backupFaellig()) {
     h += `<button class="hinweis warn" data-action="export">💾 Backup ist über 30 Tage alt (oder noch nie gemacht). Jetzt sichern</button>`;
   }
+
+  // Girokonto (nur im aktuellen Monat)
+  if (aktMonat === heute().slice(0, 7)) h += htmlKonto();
 
   // Meine Monatszahl
   const fixAnteil = z.ausgaben ? (z.fix / z.ausgaben) * 100 : 0;
@@ -760,7 +824,8 @@ async function formSpeichern() {
   const notiz = document.getElementById('f-notiz').value.trim();
 
   const b = { id: form.id || neueId(), datum, betrag, art: form.art,
-    kategorieId: form.kategorieId, notiz, vorlageId: form.vorlageId || null };
+    kategorieId: form.kategorieId, notiz, vorlageId: form.vorlageId || null,
+    erstellt: form.erstellt || Date.now() };
 
   // Häkchen "Jeden Monat" → zusätzlich eine monatliche Vorlage anlegen
   const wiederkehrend = document.getElementById('f-wiederkehrend');
@@ -1162,6 +1227,21 @@ document.addEventListener('click', async (ev) => {
     }
 
     // Monatliche Vorlagen
+    // Girokonto
+    case 'konto-bearbeiten':
+      kontoBearbeiten = true; render();
+      setTimeout(() => document.getElementById('konto-eingabe')?.select(), 50);
+      break;
+    case 'konto-abbrechen': kontoBearbeiten = false; render(); break;
+    case 'konto-speichern': {
+      const cent = centAusText(document.getElementById('konto-eingabe').value.replace(/^\+/, ''));
+      if (cent === null) return toast('Bitte einen Betrag eingeben (minus ist erlaubt)');
+      Object.assign(daten.einst, { kontoStand: cent, kontoStichtag: heute(), kontoZeit: Date.now() });
+      await einstSpeichern();
+      kontoBearbeiten = false; render(); toast('Kontostand gespeichert ✓');
+      break;
+    }
+
     case 'vorlagen-uebernehmen': await vorlagenUebernehmen(aktMonat); render(); break;
     case 'vorlage-neu': {
       const name = document.getElementById('v-name').value.trim();
