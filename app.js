@@ -4,6 +4,7 @@
    ---------------------------------------------------------------------
    Aufbau dieser Datei:
      1. Hilfsfunktionen (Geld, Datum, Text)
+     (neu in 1.1: Kredite & Verträge → siehe Abschnitt 4b)
      2. Datenbank (IndexedDB) – speichert alles nur lokal auf dem Handy
      3. Startdaten (Standard-Kategorien, Standard-Einstellungen)
      4. Berechnungen (Monatszahl, Sparquote, Puffer …)
@@ -16,7 +17,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -88,8 +89,8 @@ function toast(text) {
    --------------------------------------------------------------------- */
 
 const DB_NAME = 'meine-finanzen';
-const DB_VERSION = 1;
-const TABELLEN = ['buchungen', 'kategorien', 'vorlagen', 'einstellungen'];
+const DB_VERSION = 2; // 2 = neue Tabelle "kredite"
+const TABELLEN = ['buchungen', 'kategorien', 'vorlagen', 'einstellungen', 'kredite'];
 let db;
 
 function dbOeffnen() {
@@ -121,12 +122,13 @@ const dbDelete = (t, id) => dbAktion(t, 'readwrite', (s) => s.delete(id));
 const dbLeeren = (t) => dbAktion(t, 'readwrite', (s) => s.clear());
 
 // Alle Daten im Speicher
-const daten = { buchungen: [], kategorien: [], vorlagen: [], einst: {} };
+const daten = { buchungen: [], kategorien: [], vorlagen: [], kredite: [], einst: {} };
 
 async function allesLaden() {
   daten.buchungen = await dbAlle('buchungen');
   daten.kategorien = await dbAlle('kategorien');
   daten.vorlagen = await dbAlle('vorlagen');
+  daten.kredite = await dbAlle('kredite');
   const e = await dbAlle('einstellungen');
   daten.einst = { ...STANDARD_EINST, ...(e[0] || {}) };
 }
@@ -249,8 +251,13 @@ function kleineAusgaben(m) {
 }
 
 // Fixkosten-Vorlagen, die im Monat noch nicht eingetragen sind
-const fehlendeVorlagen = (m) => daten.vorlagen.filter(
-  (v) => !daten.buchungen.some((b) => b.vorlageId === v.id && b.datum.startsWith(m)));
+const fehlendeVorlagen = (m) => daten.vorlagen.filter((v) => {
+  if (v.kreditId) { // Rate eines Kredits: nach der letzten Rate nicht mehr vorschlagen
+    const k = daten.kredite.find((x) => x.id === v.kreditId);
+    if (k) { const ende = kreditInfo(k).ende; if (!ende || m > ende) return false; }
+  }
+  return !daten.buchungen.some((b) => b.vorlageId === v.id && b.datum.startsWith(m));
+});
 
 async function vorlagenUebernehmen(m) {
   const [j, mo] = m.split('-').map(Number);
@@ -264,6 +271,65 @@ async function vorlagenUebernehmen(m) {
     });
   }
   toast(`${liste.length} Fixkosten eingetragen ✓`);
+}
+
+/* ---------------------------------------------------------------------
+   4b. Kredite & Verträge
+   typ "kredit":  Restschuld + Zinssatz bekannt → App rechnet Monat für Monat
+                  (Zinsen drauf, Rate runter), bis die Schuld bei 0 ist.
+   typ "vertrag": z. B. Leasing – nur Rate + letzter Monat bekannt.
+   --------------------------------------------------------------------- */
+
+// Datum der Rate in einem Monat, z. B. Tag 31 im Februar → 28.
+function rateDatum(k, monat) {
+  const [j, m] = monat.split('-').map(Number);
+  const tage = new Date(j, m, 0).getDate();
+  return `${monat}-${String(Math.min(k.tag || 1, tage)).padStart(2, '0')}`;
+}
+
+function kreditInfo(k) {
+  const heuteT = heute();
+
+  if (k.typ === 'vertrag') {
+    let m = heuteT.slice(0, 7);
+    if (rateDatum(k, m) <= heuteT) m = monatVerschieben(m, 1); // Rate diesen Monat schon abgebucht
+    let raten = 0;
+    while (m <= k.ende && raten < 1200) { raten++; m = monatVerschieben(m, 1); }
+    return { raten, ende: raten ? k.ende : null, offen: raten * k.rate };
+  }
+
+  // Kredit: Restschuld vom Eingabetag (stichtag) bis heute fortschreiben
+  const zinsProMonat = (k.zins || 0) / 100 / 12;
+  let rest = k.restschuld;
+  let m = k.stichtag.slice(0, 7);
+  for (let i = 0; i < 1200 && rest > 0; i++) {
+    const d = rateDatum(k, m);
+    if (d > heuteT) break;
+    if (d > k.stichtag) rest = Math.max(0, rest + Math.round(rest * zinsProMonat) - k.rate);
+    m = monatVerschieben(m, 1);
+  }
+  const restschuld = rest;
+  if (rest > 0 && Math.round(rest * zinsProMonat) >= k.rate) {
+    return { restschuld, endlos: true, ende: '9999-12', raten: Infinity, offen: rest };
+  }
+  // Ab jetzt in die Zukunft rechnen: wie viele Raten noch, wie viel Zinsen?
+  let raten = 0, zinsen = 0, ende = null;
+  while (rest > 0 && raten < 1200) {
+    const z = Math.round(rest * zinsProMonat);
+    zinsen += z;
+    rest = rest + z - k.rate;
+    raten++; ende = m; m = monatVerschieben(m, 1);
+  }
+  return { restschuld, raten, ende, zinsen, offen: restschuld + zinsen };
+}
+
+// "noch 17 Raten · letzte im März 2028"
+function laufzeitText(i) {
+  if (i.endlos) return '<span class="rot">Rate deckt nicht einmal die Zinsen!</span>';
+  if (!i.raten) return '<span class="gruen">abbezahlt 🎉</span>';
+  const jahre = Math.floor(i.raten / 12), monate = i.raten % 12;
+  const dauer = jahre ? `${jahre} J. ${monate} M.` : `${monate} M.`;
+  return `noch ${i.raten} Rate${i.raten > 1 ? 'n' : ''} (${dauer}) · letzte im ${monatName(i.ende)}`;
 }
 
 function backupFaellig() {
@@ -383,6 +449,28 @@ function htmlUebersicht() {
     }).join('') + `</section>`;
   }
 
+  // Kredite & Verträge
+  if (daten.kredite.length) {
+    const infos = daten.kredite.map((k) => ({ k, i: kreditInfo(k) }));
+    const raten = infos.filter((x) => x.i.raten > 0).reduce((s, x) => s + x.k.rate, 0);
+    const offen = infos.reduce((s, x) => s + (x.i.offen || 0), 0);
+    h += `<section class="karte"><h2>Kredite & Verträge</h2>
+      <div class="zeile"><span>Raten pro Monat</span><b>${euro(raten)}</b></div>
+      <div class="zeile"><span>Insgesamt noch zu zahlen</span><b class="rot">${euro(offen)}</b></div>
+      ${infos.map(({ k, i }) => {
+        const anteil = k.typ === 'kredit' && k.ursprung > 0 ? Math.min(1, Math.max(0, 1 - i.restschuld / k.ursprung)) : null;
+        return `<div class="katzeile" style="margin-top:14px">
+          <div class="zeile"><b>${esc(k.name)}</b><span>${euro(k.rate)}/Monat</span></div>
+          <div class="klein grau">${k.typ === 'kredit'
+            ? `Restschuld ${euro(i.restschuld)}${k.zins ? ` · ${String(k.zins).replace('.', ',')} % Zins` : ''}${i.zinsen ? ` · noch ${euro(i.zinsen)} Zinsen` : ''}`
+            : `noch offen ${euro(i.offen)}`}</div>
+          ${anteil !== null ? `<div class="leiste"><span style="width:${anteil * 100}%;background:var(--gruen)"></span></div><div class="klein grau">${prozent(anteil)} getilgt</div>` : ''}
+          <div class="klein">${laufzeitText(i)}</div>
+        </div>`;
+      }).join('')}
+    </section>`;
+  }
+
   // Kleine Ausgaben, die sich summieren
   const klein = kleineAusgaben(aktMonat);
   if (klein.anzahl > 0) {
@@ -459,6 +547,39 @@ function htmlEinstellungen() {
     </div>
     <label class="feld"><span>Kategorie</span><select id="v-kat">${katOptionen}</select></label>
     <button class="knopf" data-action="vorlage-neu">Vorlage hinzufügen</button>
+  </section>
+
+  <section class="karte"><h2>🏦 Kredite & Verträge</h2>
+    ${daten.kredite.length ? daten.kredite.map((k) => {
+      const i = kreditInfo(k);
+      return `<div style="margin-bottom:14px">
+        <div class="katedit">
+          <span style="flex:1"><b>${esc(k.name)}</b><br><span class="klein grau">${euro(k.rate)} am ${k.tag}. · ${laufzeitText(i)}</span></span>
+          <button class="x" data-action="kredit-loeschen" data-id="${k.id}" aria-label="Löschen">✕</button>
+        </div>
+        ${k.typ === 'kredit' ? `<label class="feld"><span>Restschuld heute (zum Korrigieren, z. B. laut Kontoauszug)</span>
+          <input type="text" inputmode="decimal" data-kredit-feld="restschuld" data-id="${k.id}" value="${centZuText(i.restschuld)}"></label>` : ''}
+      </div>`;
+    }).join('') : '<div class="klein grau" style="margin-bottom:10px">Noch keine Kredite oder Verträge.</div>'}
+    <div class="unter">Neu hinzufügen</div>
+    <label class="feld"><span>Art</span><select id="kr-typ">
+      <option value="kredit">Kredit / Ratenkauf (Restschuld bekannt)</option>
+      <option value="vertrag">Leasing / Vertrag (Enddatum bekannt)</option></select></label>
+    <label class="feld"><span>Name (z. B. Autokredit, Handy-Ratenkauf, Leasing)</span><input type="text" id="kr-name"></label>
+    <div class="zwei">
+      <label class="feld"><span>Monatliche Rate (€)</span><input type="text" inputmode="decimal" id="kr-rate"></label>
+      <label class="feld"><span>Abbuchung am Tag</span><input type="number" min="1" max="31" id="kr-tag" value="1"></label>
+    </div>
+    <div class="nur-kredit">
+      <div class="zwei">
+        <label class="feld"><span>Restschuld heute (€)</span><input type="text" inputmode="decimal" id="kr-rest"></label>
+        <label class="feld"><span>Zinssatz % (sonst 0)</span><input type="text" inputmode="decimal" id="kr-zins" placeholder="z. B. 5,9"></label>
+      </div>
+      <label class="feld"><span>Ursprünglicher Kreditbetrag (€, optional – für Fortschrittsbalken)</span><input type="text" inputmode="decimal" id="kr-ursprung"></label>
+    </div>
+    <label class="feld nur-vertrag" hidden><span>Monat der letzten Rate</span><input type="month" id="kr-ende" style="color-scheme:dark"></label>
+    <label class="check"><input type="checkbox" id="kr-vorlage" checked>Rate als Fixkosten-Vorlage anlegen (Häkchen weg, wenn du sie schon als Vorlage hast)</label>
+    <button class="knopf" data-action="kredit-neu">Hinzufügen</button>
   </section>
 
   <section class="karte"><h2>🏷️ Kategorien</h2>
@@ -579,15 +700,14 @@ async function formSpeichern() {
    7. Backup
    --------------------------------------------------------------------- */
 
-function backupDatei() {
+function backupJson() {
   const paket = {
     app: 'meine-finanzen', format: 1, appVersion: APP_VERSION,
     exportiertAm: new Date().toISOString(),
     buchungen: daten.buchungen, kategorien: daten.kategorien,
-    vorlagen: daten.vorlagen, einstellungen: daten.einst,
+    vorlagen: daten.vorlagen, kredite: daten.kredite, einstellungen: daten.einst,
   };
-  const json = JSON.stringify(paket, null, 2);
-  return new File([json], `finanzen-backup-${heute()}.json`, { type: 'application/json' });
+  return JSON.stringify(paket, null, 2);
 }
 
 async function backupErledigt() {
@@ -597,7 +717,7 @@ async function backupErledigt() {
 }
 
 async function exportieren() {
-  const datei = backupDatei();
+  const datei = new File([backupJson()], `finanzen-backup-${heute()}.json`, { type: 'application/json' });
   const url = URL.createObjectURL(datei);
   const a = document.createElement('a');
   a.href = url; a.download = datei.name;
@@ -608,8 +728,10 @@ async function exportieren() {
 }
 
 // Über das Android-Teilen-Menü direkt an Google Drive, Mail usw. schicken
+// Android-Chrome erlaubt beim Teilen keine .json-Dateien → als .txt teilen
+// (Inhalt ist identisch, "Wiederherstellen" kann beide lesen)
 async function teilen() {
-  const datei = backupDatei();
+  const datei = new File([backupJson()], `finanzen-backup-${heute()}.txt`, { type: 'text/plain' });
   if (!navigator.canShare || !navigator.canShare({ files: [datei] })) {
     return toast('Teilen geht hier nicht – nimm „Backup herunterladen“');
   }
@@ -617,7 +739,7 @@ async function teilen() {
     await navigator.share({ files: [datei], title: 'Finanzen-Backup' });
     await backupErledigt();
   } catch (err) {
-    if (err.name !== 'AbortError') toast('Teilen fehlgeschlagen');
+    if (err.name !== 'AbortError') toast(`Teilen fehlgeschlagen (${err.name})`);
   }
 }
 
@@ -632,6 +754,7 @@ async function importieren(datei) {
   for (const b of p.buchungen) await dbPut('buchungen', b);
   for (const k of p.kategorien || []) await dbPut('kategorien', k);
   for (const v of p.vorlagen || []) await dbPut('vorlagen', v);
+  for (const k of p.kredite || []) await dbPut('kredite', k);
   await dbPut('einstellungen', { ...STANDARD_EINST, ...(p.einstellungen || {}), id: 'haupt' });
   await allesLaden();
   if (daten.kategorien.length === 0) await startdatenAnlegen();
@@ -690,6 +813,47 @@ document.addEventListener('click', async (ev) => {
       render(); toast('Vorlage gespeichert ✓');
       break;
     }
+    // Kredite & Verträge
+    case 'kredit-neu': {
+      const wert = (id) => document.getElementById(id).value;
+      const typ = wert('kr-typ');
+      const name = wert('kr-name').trim();
+      const rate = centAusText(wert('kr-rate'));
+      const tag = Math.min(Math.max(Number(wert('kr-tag')) || 1, 1), 31);
+      if (!name || !rate || rate <= 0) return toast('Bitte Name und Rate eingeben');
+      const k = { id: neueId(), typ, name, rate, tag };
+      if (typ === 'kredit') {
+        k.restschuld = centAusText(wert('kr-rest'));
+        if (!k.restschuld || k.restschuld <= 0) return toast('Bitte die Restschuld eingeben');
+        k.zins = Number((wert('kr-zins') || '0').replace(',', '.')) || 0;
+        k.ursprung = centAusText(wert('kr-ursprung')) || null;
+        k.stichtag = heute();
+      } else {
+        k.ende = wert('kr-ende');
+        if (!k.ende) return toast('Bitte den Monat der letzten Rate wählen');
+      }
+      await speichern('kredite', k);
+      if (document.getElementById('kr-vorlage').checked) {
+        // passende Kategorie suchen oder anlegen
+        let kategorie = daten.kategorien.find((x) => x.name === 'Kredite & Leasing');
+        if (!kategorie) {
+          kategorie = { id: neueId(), name: 'Kredite & Leasing', art: 'ausgabe', fix: true, farbe: '#e57373',
+            reihenfolge: Math.max(0, ...daten.kategorien.map((x) => x.reihenfolge ?? 0)) + 1 };
+          await speichern('kategorien', kategorie);
+        }
+        await speichern('vorlagen', { id: neueId(), name, betrag: rate, tag, kategorieId: kategorie.id, kreditId: k.id });
+      }
+      render(); toast('Hinzugefügt ✓');
+      break;
+    }
+    case 'kredit-loeschen':
+      if (confirm('Kredit/Vertrag löschen? Die zugehörige Fixkosten-Vorlage wird mitgelöscht, bereits eingetragene Buchungen bleiben.')) {
+        await loeschen('kredite', id);
+        for (const v of daten.vorlagen.filter((v) => v.kreditId === id)) await loeschen('vorlagen', v.id);
+        render();
+      }
+      break;
+
     case 'vorlage-loeschen':
       if (confirm('Vorlage löschen? (Bereits eingetragene Buchungen bleiben erhalten.)')) {
         await loeschen('vorlagen', id); render();
@@ -743,6 +907,23 @@ document.addEventListener('change', async (ev) => {
     await einstSpeichern();
     if (el.type === 'checkbox') render();
     toast('Gespeichert ✓');
+    return;
+  }
+
+  if (el.id === 'kr-typ') { // passende Felder ein-/ausblenden
+    document.querySelectorAll('.nur-kredit').forEach((x) => (x.hidden = el.value !== 'kredit'));
+    document.querySelectorAll('.nur-vertrag').forEach((x) => (x.hidden = el.value !== 'vertrag'));
+    return;
+  }
+
+  if (el.dataset.kreditFeld === 'restschuld') {
+    const k = daten.kredite.find((x) => x.id === el.dataset.id);
+    const cent = centAusText(el.value);
+    if (cent === null || cent < 0) return toast('Ungültiger Betrag');
+    k.restschuld = cent;
+    k.stichtag = heute(); // ab heute neu rechnen
+    await speichern('kredite', k);
+    render(); toast('Restschuld aktualisiert ✓');
     return;
   }
 

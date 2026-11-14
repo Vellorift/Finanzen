@@ -4,7 +4,7 @@
    Version gesucht. Updates sind deshalb beim ÜBERNÄCHSTEN Öffnen sichtbar.
    Deine Finanzdaten liegen NICHT hier, sondern in IndexedDB. */
 
-const CACHE = 'finanzen-cache-v1';
+const CACHE = 'finanzen-cache-v2';
 const DATEIEN = ['./', './index.html', './app.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -21,7 +21,8 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || !e.request.url.startsWith(self.location.origin)) return;
-  const ausNetz = fetch(e.request).then(async (antwort) => {
+  // cache: 'no-cache' = beim Server nachfragen, ob es eine neue Version gibt
+  const ausNetz = fetch(e.request.url, { cache: 'no-cache' }).then(async (antwort) => {
     if (antwort.ok) (await caches.open(CACHE)).put(e.request, antwort.clone());
     return antwort;
   }).catch(() => null);
