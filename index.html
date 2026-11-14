@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1216">
+<title>Meine Finanzen</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  /* ===== Farben (Dark Mode) – hier kannst du alles umfärben ===== */
+  :root {
+    --bg:#0f1216; --karte:#1a1f26; --karte2:#232a33; --rand:#2c343f;
+    --text:#e9ecef; --grau:#98a2ad;
+    --rot:#ff6b6b; --gruen:#43d18a; --blau:#5aa9ff; --gelb:#ffd166;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  body { padding-bottom:calc(90px + env(safe-area-inset-bottom)); }
+  button, input, select { font:inherit; color:inherit; }
+  button { cursor:pointer; }
+
+  /* Kopfzeile mit Monatswechsel */
+  header { position:sticky; top:0; z-index:5; display:flex; align-items:center;
+    justify-content:space-between; gap:8px; background:var(--bg);
+    padding:calc(10px + env(safe-area-inset-top)) 12px 10px; border-bottom:1px solid var(--rand); }
+  header h1 { margin:0; font-size:1.15rem; font-weight:600; }
+  .pfeil { background:var(--karte); border:0; border-radius:12px; width:44px; height:40px; font-size:1.5rem; }
+
+  main { padding:12px; max-width:640px; margin:0 auto; display:flex; flex-direction:column; gap:12px; }
+
+  /* Karten */
+  .karte { background:var(--karte); border-radius:16px; padding:14px 16px; }
+  .karte h2 { margin:0 0 10px; font-size:.95rem; color:var(--grau); font-weight:600; }
+  .label { color:var(--grau); font-size:.9rem; }
+  .zahl { font-size:2.2rem; font-weight:700; letter-spacing:-.5px; margin:2px 0 8px; font-variant-numeric:tabular-nums; }
+  .zahl.mittel { font-size:1.6rem; }
+  .klein { font-size:.85rem; } .grau { color:var(--grau); }
+  .rot { color:var(--rot); } .gruen { color:var(--gruen); } .blau { color:var(--blau); } .gelb { color:var(--gelb); }
+  .raster { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .raster .karte { padding:12px 14px; }
+  .wert { font-size:1.2rem; font-weight:600; font-variant-numeric:tabular-nums; }
+  .leiste { height:10px; border-radius:5px; background:var(--karte2); overflow:hidden; display:flex; margin:6px 0; }
+  .leiste > span { display:block; height:100%; }
+  .zeile { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .katzeile { margin:10px 0; }
+  .punkt { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px; flex:none; }
+  .hinweis { display:block; width:100%; text-align:left; background:#1d2a3a; border:1px solid #2d4a6b;
+    color:var(--text); border-radius:14px; padding:12px 14px; }
+  .hinweis.warn { background:#3a2e1a; border-color:#6b5420; }
+  .leer { text-align:center; color:var(--grau); padding:30px 10px; }
+  .tippbar { cursor:pointer; }
+
+  /* Buchungsliste */
+  .tag { color:var(--grau); font-size:.85rem; margin:10px 4px 2px; }
+  .buchung { display:flex; align-items:center; gap:10px; width:100%; background:var(--karte); border:0;
+    border-radius:12px; padding:12px; text-align:left; }
+  .buchung .mitte { flex:1; min-width:0; }
+  .buchung .notiz { color:var(--grau); font-size:.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .buchung .betrag { font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+  /* Navigation unten + runder Plus-Knopf */
+  nav.unten { position:fixed; left:0; right:0; bottom:0; z-index:6; display:grid; grid-template-columns:1fr 1fr 1fr;
+    background:var(--karte); border-top:1px solid var(--rand); padding:6px 6px calc(6px + env(safe-area-inset-bottom)); }
+  nav.unten button { background:none; border:0; color:var(--grau); font-size:.75rem; display:flex;
+    flex-direction:column; align-items:center; gap:2px; padding:6px 0; }
+  nav.unten button span { font-size:1.3rem; }
+  nav.unten button.aktiv { color:var(--blau); }
+  .fab { position:fixed; right:18px; bottom:calc(84px + env(safe-area-inset-bottom)); z-index:7;
+    width:62px; height:62px; border-radius:50%; border:0; background:var(--blau); color:#0b1a2b;
+    font-size:2.2rem; font-weight:700; box-shadow:0 6px 18px rgba(0,0,0,.5); }
+
+  /* Eingabe-Formular (Vollbild) */
+  .sheet { position:fixed; inset:0; z-index:20; background:var(--bg); overflow-y:auto;
+    padding:calc(12px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom)); }
+  .sheet[hidden] { display:none; }
+  .sheet-inhalt { max-width:640px; margin:0 auto; }
+  .segment { display:grid; grid-template-columns:repeat(3,1fr); background:var(--karte); border-radius:12px; padding:4px; gap:4px; }
+  .segment button { border:0; background:none; padding:10px; border-radius:9px; color:var(--grau); font-weight:600; }
+  .segment button.an { background:var(--karte2); color:var(--text); }
+  .betrag-eingabe { width:100%; font-size:2.4rem; font-weight:700; text-align:center; background:none; border:0;
+    border-bottom:2px solid var(--rand); padding:10px 0; margin:14px 0; outline:none; }
+  .betrag-eingabe:focus { border-color:var(--blau); }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin:6px 0 16px; }
+  .chip { border:1px solid var(--rand); background:var(--karte); border-radius:20px; padding:8px 14px; display:flex; align-items:center; }
+  .chip.an { border-color:var(--blau); background:#1d2a3a; }
+  .feld { display:block; margin-bottom:12px; }
+  .feld > span { display:block; color:var(--grau); font-size:.85rem; margin-bottom:4px; }
+  input[type=text], input[type=date], input[type=number], select { width:100%; background:var(--karte);
+    border:1px solid var(--rand); border-radius:10px; padding:11px 12px; outline:none; }
+  .karte input[type=text], .karte select { background:var(--karte2); }
+  input:focus, select:focus { border-color:var(--blau); }
+  input[type=date] { color-scheme:dark; }
+  .knopf { display:block; width:100%; border:0; border-radius:12px; padding:14px; font-weight:600; background:var(--karte2); }
+  .knopf.haupt { background:var(--blau); color:#0b1a2b; }
+  .knopf.gefahr { background:none; color:var(--rot); border:1px solid #5a2a2a; }
+  .knopfreihe { display:flex; gap:8px; margin-top:8px; }
+  .knopfreihe .knopf { flex:1; }
+  .check { display:flex; align-items:center; gap:10px; margin:4px 0 16px; }
+  .check input { width:20px; height:20px; }
+
+  /* Einstellungen */
+  .unter { font-size:.85rem; color:var(--grau); margin:14px 0 8px; font-weight:600; }
+  .katedit { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .katedit input[type=color] { width:36px; height:36px; border:0; padding:0; background:none; flex:none; }
+  .katedit input[type=text] { flex:1; min-width:0; }
+  .katedit label { font-size:.8rem; color:var(--grau); display:flex; align-items:center; gap:4px; flex:none; }
+  .x { border:0; background:var(--karte2); border-radius:10px; width:36px; height:36px; flex:none; color:var(--grau); }
+  .zwei { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+
+  #toast { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(160px + env(safe-area-inset-bottom));
+    background:#e9ecef; color:#111; padding:10px 18px; border-radius:20px; z-index:30; font-weight:600; }
+  #toast[hidden] { display:none; }
+</style>
+</head>
+<body>
+  <header>
+    <button class="pfeil" data-action="monat-zurueck" aria-label="Vorheriger Monat">‹</button>
+    <h1 id="titel">Meine Finanzen</h1>
+    <button class="pfeil" data-action="monat-vor" aria-label="Nächster Monat">›</button>
+  </header>
+
+  <main id="inhalt"></main>
+
+  <button class="fab" data-action="neu" aria-label="Neue Buchung">+</button>
+
+  <nav class="unten">
+    <button data-view="uebersicht"><span>📊</span>Übersicht</button>
+    <button data-view="buchungen"><span>📋</span>Buchungen</button>
+    <button data-view="einstellungen"><span>⚙️</span>Einstellungen</button>
+  </nav>
+
+  <div id="formular" class="sheet" hidden></div>
+  <div id="toast" hidden></div>
+  <input type="file" id="import-datei" accept="application/json,.json" hidden>
+
+  <script src="app.js"></script>
+</body>
+</html>
