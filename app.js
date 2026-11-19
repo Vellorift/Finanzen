@@ -18,7 +18,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -299,6 +299,27 @@ function naechsteFaelligkeit(v) {
   return null;
 }
 
+// Am Wochenende bucht die Bank nicht: Samstag/Sonntag → folgender Montag.
+// Würde der Montag schon im nächsten Monat liegen (z. B. Monatsletzter am Samstag),
+// wird stattdessen der Freitag davor genommen, damit die Buchung im richtigen Monat bleibt.
+function bankTag(datum) {
+  const [j, m, t] = datum.split('-').map(Number);
+  const wt = new Date(j, m - 1, t).getDay(); // 0 = Sonntag, 6 = Samstag
+  if (wt !== 0 && wt !== 6) return datum;
+  const montag = tagVerschieben(datum, wt === 6 ? 2 : 1);
+  if (montag.slice(0, 7) === datum.slice(0, 7)) return montag;
+  return tagVerschieben(datum, wt === 6 ? -1 : -2); // Freitag davor
+}
+// Datum einer regelmäßigen Zahlung im Monat: Tag 31 → Monatsletzter, Wochenende → Montag
+function vorlageDatum(tag, monat) {
+  const [j, m] = monat.split('-').map(Number);
+  const t = Math.min(tag || 1, new Date(j, m, 0).getDate());
+  return bankTag(`${monat}-${String(t).padStart(2, '0')}`);
+}
+
+// Betrag einer Vorlage im Monat m: einmalig geänderter Betrag (z. B. Prämie, Sondertilgung) oder der normale
+const vorlageBetrag = (v, m) => v.ausnahmen?.[m] ?? v.betrag;
+
 // Regelmäßige Vorlagen (Fixkosten, Gehalt, Sparrate, Versicherung …), die im Monat fällig, aber noch nicht eingetragen sind
 const fehlendeVorlagen = (m) => daten.vorlagen.filter((v) => {
   if (!vorlageFaellig(v, m)) return false;
@@ -310,13 +331,10 @@ const fehlendeVorlagen = (m) => daten.vorlagen.filter((v) => {
 });
 
 async function vorlagenUebernehmen(m) {
-  const [j, mo] = m.split('-').map(Number);
-  const tageImMonat = new Date(j, mo, 0).getDate();
   const liste = fehlendeVorlagen(m);
   for (const v of liste) {
-    const tag = Math.min(v.tag || 1, tageImMonat);
     await speichern('buchungen', {
-      id: neueId(), erstellt: Date.now(), datum: `${m}-${String(tag).padStart(2, '0')}`, betrag: v.betrag,
+      id: neueId(), erstellt: Date.now(), datum: vorlageDatum(v.tag, m), betrag: vorlageBetrag(v, m),
       art: v.art || 'ausgabe', kategorieId: v.kategorieId, notiz: v.name, vorlageId: v.id,
     });
   }
@@ -346,11 +364,8 @@ function kontoInfo() {
   const monat = h.slice(0, 7);
   let ende = stand;
   for (const b of buchungenImMonat(monat)) if (b.datum > h && zaehlt(b)) ende += wirkung(b.art, b.betrag);
-  const heuteTag = Number(h.slice(8, 10));
-  const [j, m] = monat.split('-').map(Number);
-  const tageImMonat = new Date(j, m, 0).getDate();
   for (const v of fehlendeVorlagen(monat)) {
-    if (Math.min(v.tag, tageImMonat) > heuteTag) ende += wirkung(v.art || 'ausgabe', v.betrag);
+    if (vorlageDatum(v.tag, monat) > h) ende += wirkung(v.art || 'ausgabe', vorlageBetrag(v, monat));
   }
   return { stand, ende };
 }
@@ -422,11 +437,14 @@ function monatLesen(id) {
    typ "vertrag": z. B. Leasing – nur Rate + letzter Monat bekannt.
    --------------------------------------------------------------------- */
 
-// Datum der Rate in einem Monat, z. B. Tag 31 im Februar → 28.
-function rateDatum(k, monat) {
-  const [j, m] = monat.split('-').map(Number);
-  const tage = new Date(j, m, 0).getDate();
-  return `${monat}-${String(Math.min(k.tag || 1, tage)).padStart(2, '0')}`;
+// Datum der Rate in einem Monat, z. B. Tag 31 im Februar → 28., Wochenende → Montag
+const rateDatum = (k, monat) => vorlageDatum(k.tag, monat);
+
+// Rate in einem Monat: normal k.rate, außer die zugehörige Vorlage hat dort
+// einen einmaligen Betrag (z. B. Sondertilgung)
+function rateImMonat(k, monat) {
+  const v = daten.vorlagen.find((x) => x.kreditId === k.id);
+  return v?.ausnahmen?.[monat] ?? k.rate;
 }
 
 function kreditInfo(k) {
@@ -447,7 +465,7 @@ function kreditInfo(k) {
   for (let i = 0; i < 1200 && rest > 0; i++) {
     const d = rateDatum(k, m);
     if (d > heuteT) break;
-    if (d > k.stichtag) rest = Math.max(0, rest + Math.round(rest * zinsProMonat) - k.rate);
+    if (d > k.stichtag) rest = Math.max(0, rest + Math.round(rest * zinsProMonat) - rateImMonat(k, m));
     m = monatVerschieben(m, 1);
   }
   const restschuld = rest;
@@ -459,7 +477,7 @@ function kreditInfo(k) {
   while (rest > 0 && raten < 1200) {
     const z = Math.round(rest * zinsProMonat);
     zinsen += z;
-    rest = rest + z - k.rate;
+    rest = rest + z - rateImMonat(k, m);
     raten++; ende = m; m = monatVerschieben(m, 1);
   }
   return { restschuld, raten, ende, zinsen, offen: restschuld + zinsen };
@@ -477,10 +495,25 @@ function restschuldAusLaufzeit(rate, raten, zinsProzent) {
 // "noch 17 Raten · letzte im März 2028"
 function laufzeitText(i) {
   if (i.endlos) return '<span class="rot">Rate deckt nicht einmal die Zinsen!</span>';
-  if (!i.raten) return '<span class="gruen">abbezahlt 🎉</span>';
+  if (!i.raten) return '<span class="gruen">laut Plan abbezahlt 🎉 – bitte bestätigen</span>';
   const jahre = Math.floor(i.raten / 12), monate = i.raten % 12;
   const dauer = jahre ? `${jahre} J. ${monate} M.` : `${monate} M.`;
   return `noch ${i.raten} Rate${i.raten > 1 ? 'n' : ''} (${dauer}) · letzte im ${monatName(i.ende)}`;
+}
+
+// Laut Plan fertig = keine Rate mehr offen (die letzte ist schon abgebucht)
+const kreditFertig = (k) => { const i = kreditInfo(k); return !i.endlos && !i.raten; };
+
+// Nachfrage: „Ist alles bezahlt?“ – gelöscht wird erst nach deinem Ja
+function kreditFertigHinweise() {
+  return daten.kredite.filter(kreditFertig).map((k) => `
+    <div class="hinweis fertig">🎉 <b>${esc(k.name)}</b> ist laut Plan abbezahlt.
+      <div class="klein grau" style="margin-top:4px">Ist wirklich alles bezahlt? Erst dann wird der Eintrag samt regelmäßiger Rate gelöscht.</div>
+      <div class="knopfreihe">
+        <button class="knopf haupt" data-action="kredit-fertig-ja" data-id="${k.id}">Ja, alles bezahlt</button>
+        <button class="knopf" data-action="kredit-fertig-nein" data-id="${k.id}">Nein, noch offen</button>
+      </div>
+    </div>`).join('');
 }
 
 function backupFaellig() {
@@ -550,8 +583,11 @@ function htmlUebersicht() {
   const fehlend = fehlendeVorlagen(aktMonat);
   if (fehlend.length) {
     h += `<button class="hinweis" data-action="vorlagen-uebernehmen">📌 ${fehlend.length} regelmäßige Buchung${fehlend.length > 1 ? 'en' : ''} für ${monatName(aktMonat)} eintragen
-      <div class="klein grau" style="margin-top:4px">${fehlend.map((v) => esc(v.name)).join(' · ')}</div></button>`;
+      <div class="klein grau" style="margin-top:4px">${fehlend.map((v) => esc(v.name)
+        + (vorlageBetrag(v, aktMonat) !== v.betrag ? ` (einmalig ${euro(vorlageBetrag(v, aktMonat))})` : '')).join(' · ')}</div></button>`;
   }
+  // Kredite/Verträge, die laut Plan fertig sind → erst nachfragen, dann löschen
+  h += kreditFertigHinweise();
   if (backupFaellig()) {
     h += `<button class="hinweis warn" data-action="export">💾 Backup ist über 30 Tage alt (oder noch nie gemacht). Jetzt sichern</button>`;
   }
@@ -709,8 +745,10 @@ function prognose(anzahl) {
       if (b.datum > h && !b.vorlageId) r.ereignisse.push(`⏳ ${esc(b.notiz || kat(b.kategorieId)?.name || 'Geplant')} ${vz(b.art)}${euro(b.betrag)}`);
     }
     for (const v of fehlendeVorlagen(m)) {
-      plus(v.art || 'ausgabe', v.betrag);
-      if ((v.intervall || 1) > 1) r.ereignisse.push(`🔁 ${esc(v.name)} ${vz(v.art)}${euro(v.betrag)}`);
+      const betrag = vorlageBetrag(v, m);
+      plus(v.art || 'ausgabe', betrag);
+      if ((v.intervall || 1) > 1) r.ereignisse.push(`🔁 ${esc(v.name)} ${vz(v.art)}${euro(betrag)}`);
+      else if (betrag !== v.betrag) r.ereignisse.push(`✱ ${esc(v.name)} einmalig ${vz(v.art)}${euro(betrag)}`);
     }
     // variable Ausgaben: im laufenden Monat nur der Rest, der voraussichtlich noch kommt
     if (i === 0) {
@@ -802,6 +840,27 @@ const katOptionenFuer = (art, gewaehlt) => kategorienVon(art)
   .map((k) => `<option value="${k.id}" ${k.id === gewaehlt ? 'selected' : ''}>${esc(k.name)}</option>`).join('');
 let vorlageInBearbeitung = null; // id der monatlichen Buchung, die gerade bearbeitet wird
 
+// Einmalige Beträge ab dem aktuellen Monat, sortiert: [["2026-12", 150000], …]
+const kommendeAusnahmen = (v) => Object.entries(v.ausnahmen || {})
+  .filter(([m]) => m >= heute().slice(0, 7)).sort((a, b) => a[0].localeCompare(b[0]));
+
+// Kasten im ✎-Formular: Betrag nur für einen Monat ändern (Prämie, Sondertilgung …)
+function htmlEinmalig(v) {
+  const kredit = v.kreditId ? daten.kredite.find((k) => k.id === v.kreditId) : null;
+  const beispiel = kredit ? 'Rate + Sondertilgung' : v.art === 'einnahme' ? 'Gehalt + Prämie' : 'Nachzahlung';
+  return `<div class="einmalig-box">
+    <div class="label" style="margin-bottom:6px">💶 Nur einmalig anderer Betrag</div>
+    <div class="klein grau" style="margin-bottom:8px">Z. B. ${beispiel}. Gilt nur für den gewählten Monat, danach wieder ${euro(v.betrag)}.
+      ${kredit && kredit.typ === 'kredit' ? 'Eine Sondertilgung senkt auch die Restschuld.' : ''}</div>
+    ${htmlMonatWahl('v-ein-monat', naechsteFaelligkeit(v) || heute().slice(0, 7))}
+    <input type="text" inputmode="decimal" id="v-ein-betrag" style="margin:8px 0" placeholder="Betrag nur in diesem Monat">
+    <button class="knopf" data-action="einmalig-speichern">Einmalig übernehmen</button>
+    ${kommendeAusnahmen(v).map(([m, b]) => `<div class="zeile klein" style="margin-top:8px">
+      <span>✱ ${monatName(m)}: <b>${euro(b)}</b></span>
+      <button class="x" data-action="einmalig-loeschen" data-monat="${m}" aria-label="Einmaligen Betrag entfernen">✕</button></div>`).join('')}
+  </div>`;
+}
+
 function htmlEinstellungen() {
   const e = daten.einst;
   const euroFeld = (feld, wert) =>
@@ -839,12 +898,14 @@ function htmlEinstellungen() {
     ${vorlagenSortiert.length ? vorlagenSortiert.map((v) => `
       <div class="katedit">
         <span class="punkt" style="background:${esc(kat(v.kategorieId)?.farbe || '#666')}"></span>
-        <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${vorzeichen[v.art || 'ausgabe']}${euro(v.betrag)} · ${(v.intervall || 1) > 1 ? `${intervallName(v.intervall).toLowerCase()}, nächste ${monatKurz(naechsteFaelligkeit(v) || heute().slice(0, 7))} · ` : ''}${tagText(v.tag)} · ${esc(kat(v.kategorieId)?.name || '?')}</span></span>
+        <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${vorzeichen[v.art || 'ausgabe']}${euro(v.betrag)} · ${(v.intervall || 1) > 1 ? `${intervallName(v.intervall).toLowerCase()}, nächste ${monatKurz(naechsteFaelligkeit(v) || heute().slice(0, 7))} · ` : ''}${tagText(v.tag)} · ${esc(kat(v.kategorieId)?.name || '?')}${kommendeAusnahmen(v).map(([m, b]) =>
+          `<br><span class="gelb">✱ ${monatKurz(m)} einmalig ${vorzeichen[v.art || 'ausgabe']}${euro(b)}</span>`).join('')}</span></span>
         <button class="x" data-action="vorlage-bearbeiten" data-id="${v.id}" aria-label="Bearbeiten">✎</button>
         <button class="x" data-action="vorlage-loeschen" data-id="${v.id}" aria-label="Vorlage löschen">✕</button>
       </div>`).join('') : '<div class="klein grau">Noch keine Vorlagen.</div>'}
     <div id="v-formular" ${ve ? 'class="bearbeiten-box"' : ''}>
     <div class="unter">${ve ? `✎ Bearbeiten: ${esc(ve.name)}` : 'Neu'}</div>
+    ${ve ? htmlEinmalig(ve) : ''}
     <label class="feld"><span>Art</span><select id="v-art">
       ${artOption('ausgabe', 'Ausgabe (z. B. Miete, Handy, Spotify)')}
       ${artOption('einnahme', 'Einnahme (z. B. Gehalt)')}
@@ -868,13 +929,17 @@ function htmlEinstellungen() {
   <section class="karte"><h2>🏦 Kredite & Verträge</h2>
     ${daten.kredite.length ? daten.kredite.map((k) => {
       const i = kreditInfo(k);
-      return `<div style="margin-bottom:14px">
+      return `<div style="margin-bottom:14px" id="kredit-${k.id}">
         <div class="katedit">
           <span style="flex:1"><b>${esc(k.name)}</b><br><span class="klein grau">${euro(k.rate)} am ${k.tag}. · ${laufzeitText(i)}</span></span>
           <button class="x" data-action="kredit-loeschen" data-id="${k.id}" aria-label="Löschen">✕</button>
         </div>
         ${k.typ === 'kredit' ? `<label class="feld"><span>Restschuld heute (zum Korrigieren, z. B. laut Kontoauszug)</span>
-          <input type="text" inputmode="decimal" data-kredit-feld="restschuld" data-id="${k.id}" value="${centZuText(i.restschuld)}"></label>` : ''}
+          <input type="text" inputmode="decimal" data-kredit-feld="restschuld" data-id="${k.id}" value="${centZuText(i.restschuld)}"></label>`
+        : `<div class="feld"><span>Monat der letzten Rate (zum Korrigieren)</span>
+          <div data-kredit-ende="${k.id}">${htmlMonatWahl(`kr-ende-${k.id}`, k.ende)}</div></div>`}
+        ${!i.endlos && !i.raten ? `<div class="knopfreihe">
+          <button class="knopf haupt" data-action="kredit-fertig-ja" data-id="${k.id}">Ja, alles bezahlt</button></div>` : ''}
       </div>`;
     }).join('') : '<div class="klein grau" style="margin-bottom:10px">Noch keine Kredite oder Verträge.</div>'}
     <div class="unter">Neu hinzufügen</div>
@@ -1502,10 +1567,8 @@ document.addEventListener('click', async (ev) => {
         const monat = heute().slice(0, 7);
         const gebucht = daten.buchungen.find((b) => b.vorlageId === alt.id && b.datum.startsWith(monat));
         if (gebucht && confirm(`Für ${monatName(monat)} ist „${alt.name}“ schon eingetragen.\nSoll diese Buchung auch angepasst werden?`)) {
-          const [j, m] = monat.split('-').map(Number);
-          const t = Math.min(tag, new Date(j, m, 0).getDate());
-          await speichern('buchungen', { ...gebucht, betrag, art, kategorieId, notiz: name,
-            datum: `${monat}-${String(t).padStart(2, '0')}` });
+          await speichern('buchungen', { ...gebucht, betrag: alt.ausnahmen?.[monat] ?? betrag, art, kategorieId, notiz: name,
+            datum: vorlageDatum(tag, monat) });
         }
         vorlageInBearbeitung = null;
         render(); toast('Änderungen gespeichert ✓');
@@ -1524,6 +1587,42 @@ document.addEventListener('click', async (ev) => {
       vorlageInBearbeitung = null;
       render();
       break;
+
+    // Einmalig anderer Betrag (nur für einen Monat)
+    case 'einmalig-speichern': {
+      const v = daten.vorlagen.find((x) => x.id === vorlageInBearbeitung);
+      if (!v) break;
+      const monat = monatLesen('v-ein-monat');
+      const betrag = centAusText(document.getElementById('v-ein-betrag').value);
+      if (betrag === null || betrag < 0) return toast('Bitte einen Betrag eingeben');
+      if (!vorlageFaellig(v, monat)) return toast(`„${v.name}“ ist in ${monatName(monat)} gar nicht fällig`);
+      const ausnahmen = { ...(v.ausnahmen || {}) };
+      if (betrag === v.betrag) delete ausnahmen[monat]; else ausnahmen[monat] = betrag;
+      await speichern('vorlagen', { ...v, ausnahmen });
+      // Schon eingetragen? Dann die Buchung gleich mit ändern
+      const gebucht = daten.buchungen.find((b) => b.vorlageId === v.id && b.datum.startsWith(monat));
+      if (gebucht) await speichern('buchungen', { ...gebucht, betrag });
+      render();
+      document.getElementById('v-formular')?.scrollIntoView({ block: 'center' });
+      toast(`${monatName(monat)}: ${euro(betrag)} ✓${gebucht ? ' (Buchung angepasst)' : ''}`);
+      break;
+    }
+    case 'einmalig-loeschen': {
+      const v = daten.vorlagen.find((x) => x.id === vorlageInBearbeitung);
+      if (!v) break;
+      const monat = el.dataset.monat;
+      const alterBetrag = v.ausnahmen?.[monat];
+      const ausnahmen = { ...(v.ausnahmen || {}) };
+      delete ausnahmen[monat];
+      await speichern('vorlagen', { ...v, ausnahmen });
+      // Eingetragene Buchung mit dem einmaligen Betrag wieder auf normal setzen
+      const gebucht = daten.buchungen.find((b) => b.vorlageId === v.id && b.datum.startsWith(monat) && b.betrag === alterBetrag);
+      if (gebucht) await speichern('buchungen', { ...gebucht, betrag: v.betrag });
+      render();
+      document.getElementById('v-formular')?.scrollIntoView({ block: 'center' });
+      toast(`${monatName(monat)} wieder normal (${euro(v.betrag)})`);
+      break;
+    }
     // Kredite & Verträge
     case 'kredit-neu': {
       const wert = (id) => document.getElementById(id).value;
@@ -1574,6 +1673,23 @@ document.addEventListener('click', async (ev) => {
         render();
       }
       break;
+
+    // Kredit laut Plan fertig: erst nach Bestätigung löschen
+    case 'kredit-fertig-ja': {
+      const k = daten.kredite.find((x) => x.id === id);
+      if (!k) break;
+      await loeschen('kredite', id);
+      for (const v of daten.vorlagen.filter((v) => v.kreditId === id)) await loeschen('vorlagen', v.id);
+      render(); toast(`🎉 ${k.name} erledigt und gelöscht`);
+      break;
+    }
+    case 'kredit-fertig-nein': {
+      const k = daten.kredite.find((x) => x.id === id);
+      ansicht = 'einstellungen'; vorlageInBearbeitung = null; render();
+      document.getElementById(`kredit-${id}`)?.scrollIntoView({ block: 'center' });
+      toast(k?.typ === 'vertrag' ? 'Trag hier den richtigen Monat der letzten Rate ein' : 'Trag hier die echte Restschuld ein');
+      break;
+    }
 
     case 'vorlage-loeschen':
       if (confirm('Vorlage löschen? (Bereits eingetragene Buchungen bleiben erhalten.)')) {
@@ -1669,6 +1785,18 @@ document.addEventListener('change', async (ev) => {
     k.stichtag = heute(); // ab heute neu rechnen
     await speichern('kredite', k);
     render(); toast('Restschuld aktualisiert ✓');
+    return;
+  }
+
+  // Letzter Monat eines Vertrags (Leasing) korrigieren
+  const endeBox = el.closest('[data-kredit-ende]');
+  if (endeBox) {
+    const k = daten.kredite.find((x) => x.id === endeBox.dataset.kreditEnde);
+    k.ende = monatLesen(`kr-ende-${k.id}`);
+    await speichern('kredite', k);
+    render();
+    document.getElementById(`kredit-${k.id}`)?.scrollIntoView({ block: 'center' });
+    toast(`Letzte Rate: ${monatName(k.ende)} ✓`);
     return;
   }
 

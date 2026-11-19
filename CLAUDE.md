@@ -6,7 +6,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 - **App:** https://vellorift.github.io/finanzen/
 - **Code:** GitHub-Repository `Vellorift/finanzen` (öffentlich, Branch `main`, GitHub Pages aus `/ (root)`)
 - **Abgleich-Daten:** privates Repository `Vellorift/finanzen-daten`, dort nur die verschlüsselte Datei `daten.json`
-- **Aktuelle Version:** 1.8.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
+- **Aktuelle Version:** 1.9.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
 
 ## Wer ist der Nutzer / wie arbeiten wir
 
@@ -39,7 +39,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 1. Hilfsfunktionen (Geld in **Cent**, Datum als Text `"2026-11-14"`, `esc()` gegen HTML-Einschleusung)
 2. Datenbank (IndexedDB-Helfer, `daten`-Objekt im Speicher, `speichern()` / `loeschen()` / `einstSpeichern()`)
 3. Startdaten (Standard-Kategorien, `STANDARD_EINST`)
-4. Berechnungen (Monatszahlen, Puffer-Reichweite, kleine Ausgaben, fällige Vorlagen, Rhythmus `vorlageFaellig()`)
+4. Berechnungen (Monatszahlen, Puffer-Reichweite, kleine Ausgaben, fällige Vorlagen, Rhythmus `vorlageFaellig()`, `bankTag()`/`vorlageDatum()`: Wochenende → Montag, `vorlageBetrag()`: einmalige Beträge)
 4a. Tagauswahl (1. · 8. · 15. · Letzter · Anderer), Rhythmus-Auswahl, Monat/Jahr-Auswahl
 4b. Kredite & Verträge (`kreditInfo()`, Restschuld aus Laufzeit per Barwert)
 4c. Girokonto (`kontoInfo()`: Stand fortschreiben + Monatsende-Vorschau)
@@ -58,7 +58,7 @@ Gelöschte Einträge bleiben als Löschmarkierung `{ id, geloescht: true, geaend
 - **buchungen:** `datum`, `betrag`, `art` (`ausgabe` | `einnahme` | `sparen`), `kategorieId`, `notiz`, `vorlageId`, `erstellt`
   - `sparen` = Geld aufs Sparkonto, zählt **nicht** als Ausgabe. Ein Datum in der Zukunft gilt als „geplant“.
 - **kategorien:** `name`, `art`, `fix` (Fixkosten ja/nein), `farbe`, `reihenfolge`
-- **vorlagen** (regelmäßige Buchungen): `name`, `betrag`, `art`, `kategorieId`, `tag` (1–31, **31 = Monatsletzter**), `intervall` (1/3/6/12), `startMonat` (`"2027-01"`, nur bei Intervall > 1), optional `kreditId`
+- **vorlagen** (regelmäßige Buchungen): `name`, `betrag`, `art`, `kategorieId`, `tag` (1–31, **31 = Monatsletzter**), `intervall` (1/3/6/12), `startMonat` (`"2027-01"`, nur bei Intervall > 1), optional `kreditId`, optional `ausnahmen` (`{ "2026-12": 350000 }` = einmalig anderer Betrag in diesem Monat, z. B. Prämie oder Sondertilgung; bei Krediten senkt er die Restschuld über `rateImMonat()`)
 - **kredite:** `typ` (`kredit` | `vertrag`), `name`, `rate`, `tag`
   - `kredit`: `restschuld` + `stichtag` (wird bis heute fortgeschrieben), `zins` (%, optional, unter „Erweiterte Angaben“), `ursprung` (optional), `geschaetzt` (Restschuld aus Laufzeit berechnet)
   - `vertrag` (z. B. Leasing): `ende` (`"2028-03"` = Monat der letzten Rate)
@@ -100,6 +100,7 @@ Neue Tabellen nur über eine höhere `DB_VERSION` anlegen. Neue Felder brauchen 
 - **1.6** Regelmäßige Buchungen bearbeiten (✎), passt auf Wunsch die Buchung des laufenden Monats mit an
 - **1.7** Girokonto-Stand (fortgeschrieben ab dem letzten Abgleich mit der Bank) + Monatsende-Vorschau
 - **1.8** Eigener Kalender, Monat/Jahr-Auswahl, Rhythmus vierteljährlich/halbjährlich/jährlich, Tab „📈 Ausblick“ (Prognose 12/24/36 Monate, Kontostand-Verlauf, Kreditende, geplante Zahlungen, Rücklage für Quartalszahlungen)
+- **1.9** Einmalig anderer Betrag pro Monat bei regelmäßigen Buchungen (✎ → „Nur einmalig anderer Betrag“, z. B. Prämie, Sondertilgung senkt die Restschuld). Fällt eine regelmäßige Zahlung aufs Wochenende → folgender Montag (läge der im nächsten Monat → Freitag davor). Kredit/Vertrag laut Plan fertig → Nachfrage „Ist alles bezahlt?“, gelöscht wird erst nach „Ja“; bei „Nein“ Restschuld bzw. letzten Monat korrigieren (Vertragsende jetzt in den Einstellungen änderbar)
 
 ## Fahrplan / offene Punkte
 
