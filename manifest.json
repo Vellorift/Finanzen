@@ -1,17 +1,25 @@
 {
   "name": "Meine Finanzen",
   "short_name": "Finanzen",
-  "description": "Persönliche Ausgaben, Sparquote und Notgroschen im Blick",
+  "description": "Persönliche Ausgaben, Sparquote, Notgroschen und Wünsche im Blick",
   "lang": "de",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0f1216",
-  "theme_color": "#0f1216",
+  "background_color": "#0b0d11",
+  "theme_color": "#0b0d11",
   "icons": [
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Neue Ausgabe", "short_name": "Ausgabe", "url": "./?aktion=neu",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192", "type": "image/png" }] },
+    { "name": "Übersicht", "short_name": "Übersicht", "url": "./?ansicht=uebersicht",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192", "type": "image/png" }] },
+    { "name": "Wünsche", "short_name": "Wünsche", "url": "./?ansicht=wuensche",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192", "type": "image/png" }] }
   ]
 }

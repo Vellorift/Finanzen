@@ -1,24 +1,29 @@
 'use strict';
 /* =====================================================================
-   Meine Finanzen – Version 1
+   Meine Finanzen – Version 2
    ---------------------------------------------------------------------
    Aufbau dieser Datei:
-     1. Hilfsfunktionen (Geld, Datum, Text)
-     (neu in 1.1: Kredite & Verträge → siehe Abschnitt 4b)
-     (neu in 1.5: Abgleich zwischen Geräten → siehe Abschnitt 7b)
+     1. Hilfsfunktionen (Geld, Datum, Text, Symbole)
      2. Datenbank (IndexedDB) – speichert alles nur lokal auf dem Handy
      3. Startdaten (Standard-Kategorien, Standard-Einstellungen)
      4. Berechnungen (Monatszahl, Sparquote, Puffer …)
-     5. Ansichten (Übersicht, Buchungen, Einstellungen)
-     6. Eingabe-Formular (neue Buchung / bearbeiten)
-     7. Backup (Export / Import als JSON-Datei)
-     8. Bedienung (Klicks, Eingaben) und Start der App
+        4a Tagauswahl · 4b Kredite · 4c Girokonto
+        4d Wünsche & Traum-Projekte (Ampel, Spartopf, Plan)
+        4e Ziele (Karten ganz oben, Tempo, Meilensteine)
+        4f Analyse (Spar-Vorschläge), Favoriten, Abos
+     5. Ansichten (Übersicht, Buchungen, Wünsche, Einstellungen)
+        5b Auswertung (Analyse · Ausblick · Abos)
+     6. Eingabe-Formulare (Bottom Sheet: Buchung, Wunsch, Kredit …)
+     7. Backup (JSON + CSV-Export)
+     7b. Abgleich zwischen Geräten
+     7c. App-Sperre (Fingerabdruck) und Start-Bildschirm
+     8. Bedienung (Klicks, Eingaben, Wischgesten) und Start der App
 
    Wichtig: Alle Beträge werden intern in CENT gespeichert (12,50 € = 1250).
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '2.0.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -28,11 +33,21 @@ const APP_VERSION = '1.9.0';
 const euroFormat = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' });
 const euro = (cent) => euroFormat.format(cent / 100);
 
+// Wie euro(), aber die Cent kleiner/heller: "1.234<small>,56 €</small>" (für große Zahlen)
+function euroHtml(cent) {
+  const t = euro(cent);
+  const i = t.lastIndexOf(',');
+  return i < 0 ? t : `${t.slice(0, i)}<span class="ct">${t.slice(i)}</span>`;
+}
+// Gerundet ohne Cent: 123456 → "1.235 €" (für Texte wie Wunschpreise)
+const euroRund = (cent) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(cent / 100);
+
 // Text aus einem Eingabefeld → Cent. "12,50" / "12.50" / "1.234,56" → Zahl, sonst null
 function centAusText(text) {
   let t = String(text ?? '').trim().replace(/\s|€/g, '');
   if (t === '') return null;
   if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.'); // deutsches Format
+  else if (/^-?\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, ''); // "2.500" = zweitausendfünfhundert
   const zahl = Number(t);
   return Number.isFinite(zahl) ? Math.round(zahl * 100) : null;
 }
@@ -77,6 +92,69 @@ function tagAnzeige(s) {
   return new Date(j, m - 1, t).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
 }
 
+// "Heute" / "Gestern" / "Mo., 17.11."
+function tagRelativ(s) {
+  const h = heute();
+  if (s === h) return 'Heute';
+  if (s === tagVerschieben(h, -1)) return 'Gestern';
+  if (s === tagVerschieben(h, 1)) return 'Morgen';
+  return tagAnzeige(s);
+}
+// Kurzes Vibrieren (z. B. beim Speichern), falls das Handy das kann
+const vibrieren = (ms = 15) => { try { navigator.vibrate?.(ms); } catch { /* egal */ } };
+
+// Eigene Symbole (SVG) statt Emojis – sehen auf jedem Handy gleich aus.
+// Jede Zeile = Linien/Formen in einem 24×24-Raster.
+const SYMBOLE = {
+  start: '<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>',
+  liste: '<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  auswertung: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  wunsch: '<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>',
+  zahnrad: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  bank: '<path d="M3 10l9-6 9 6"/><path d="M5 10v8M9.5 10v8M14.5 10v8M19 10v8M3 21h18"/>',
+  schwein: '<path d="M19 9.5c1 .3 2 1.2 2 2.5h-1.5a7 7 0 0 1-2.5 3.6V19h-3v-2h-4v2H7v-3.4A6 6 0 0 1 4 10.5C4 7.5 7 5 11 5c2.5 0 4.6.9 5.9 2.4L19 6.5z"/><circle cx="15.5" cy="10" r=".6"/>',
+  ziel: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+  pin: '<path d="M12 17v5M9 3h6l-1 6 3 3H7l3-3z"/>',
+  warn: '<path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17.5v.5"/>',
+  karte: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M6 15h4"/>',
+  kategorie: '<path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1.2"/>',
+  suche: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
+  backup: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>',
+  sync: '<path d="M21 12a9 9 0 0 1-15.5 6.3M3 12A9 9 0 0 1 18.5 5.7"/><path d="M21 4v5h-5M3 20v-5h5"/>',
+  schloss: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  hoch: '<path d="M7 17L17 7M9 7h8v8"/>',
+  runter: '<path d="M7 7l10 10M17 9v8H9"/>',
+  idee: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z"/>',
+  haken: '<path d="M4 12l5 5L20 6"/>',
+  kreuz: '<path d="M6 6l12 12M18 6L6 18"/>',
+  stift: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M14 6l4 4"/>',
+  pfeilhoch: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  pfeilrunter: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  wiederholen: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/>',
+  blitz: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
+  kalender: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  muell: '<path d="M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3"/>',
+  farbe: '<circle cx="12" cy="12" r="9"/><circle cx="8" cy="10" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="16" cy="10" r="1.2"/><path d="M12 21a2 2 0 0 1 0-4 2 2 0 0 0 0-4"/>',
+  geschenk: '<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M5 12v9h14v-9M12 8v13M12 8S10.5 3 8 4s0 4 4 4zM12 8s1.5-5 4-4 0 4-4 4z"/>',
+  uhr: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+};
+const icon = (name) => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${SYMBOLE[name] || ''}</svg>`;
+
+// Fortschrittsring (SVG): anteil 0…1
+function ringSvg(anteil, groesse = 92, farbe = 'var(--akzent)', text = null, start = null) {
+  const r = 40, u = 2 * Math.PI * r;
+  const a = Math.max(0, Math.min(1, anteil || 0));
+  const s = start === null ? a : start; // für die Animation: erst start, dann anteil
+  return `<svg class="ring" width="${groesse}" height="${groesse}" viewBox="0 0 100 100">
+    <circle cx="50" cy="50" r="${r}" fill="none" stroke="var(--karte3)" stroke-width="9"/>
+    <circle cx="50" cy="50" r="${r}" fill="none" stroke="${farbe}" stroke-width="9" stroke-linecap="round"
+      stroke-dasharray="${u.toFixed(1)}" stroke-dashoffset="${(u * (1 - s)).toFixed(1)}" data-ziel-offset="${(u * (1 - a)).toFixed(1)}"
+      transform="rotate(-90 50 50)"/>
+    <text x="50" y="50" text-anchor="middle" dominant-baseline="central" fill="var(--text)" font-size="21" font-weight="700">${text ?? Math.floor(a * 100) + '%'}</text>
+  </svg>`;
+}
+
 // Schutz: Text, den du eingibst, wird nie als HTML ausgeführt
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -86,13 +164,15 @@ const neueId = () => (crypto.randomUUID ? crypto.randomUUID()
   : Date.now().toString(36) + Math.random().toString(36).slice(2));
 
 // Kurze Meldung unten einblenden
-let toastTimer;
-function toast(text) {
+// Optional mit Knopf, z. B. toast('Gelöscht', 'Rückgängig', () => …)
+let toastTimer, toastAktion = null;
+function toast(text, knopfText = null, aktion = null) {
   const el = document.getElementById('toast');
-  el.textContent = text;
+  el.innerHTML = `<span>${esc(text)}</span>${knopfText ? `<button data-action="toast-knopf">${esc(knopfText)}</button>` : ''}`;
+  toastAktion = aktion;
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), 2200);
+  toastTimer = setTimeout(() => { el.hidden = true; toastAktion = null; }, knopfText ? 5000 : 2200);
 }
 
 /* ---------------------------------------------------------------------
@@ -104,8 +184,8 @@ function toast(text) {
    --------------------------------------------------------------------- */
 
 const DB_NAME = 'meine-finanzen';
-const DB_VERSION = 3; // 2 = Tabelle "kredite", 3 = Tabelle "geraet"
-const TABELLEN = ['buchungen', 'kategorien', 'vorlagen', 'einstellungen', 'kredite'];
+const DB_VERSION = 4; // 2 = Tabelle "kredite", 3 = Tabelle "geraet", 4 = Tabelle "wuensche"
+const TABELLEN = ['buchungen', 'kategorien', 'vorlagen', 'einstellungen', 'kredite', 'wuensche'];
 // "geraet" = Einstellungen nur für DIESES Gerät (Abgleich-Zugang). Wird nie abgeglichen oder gesichert.
 let db;
 
@@ -138,7 +218,7 @@ const dbDelete = (t, id) => dbAktion(t, 'readwrite', (s) => s.delete(id));
 const dbLeeren = (t) => dbAktion(t, 'readwrite', (s) => s.clear());
 
 // Alle Daten im Speicher
-const daten = { buchungen: [], kategorien: [], vorlagen: [], kredite: [], einst: {} };
+const daten = { buchungen: [], kategorien: [], vorlagen: [], kredite: [], wuensche: [], einst: {} };
 
 // Gelöschte Einträge bleiben als "Löschmarkierung" in der Datenbank
 // (damit beim Abgleich das andere Gerät erfährt, dass sie gelöscht wurden)
@@ -149,6 +229,7 @@ async function allesLaden() {
   daten.kategorien = sichtbar(await dbAlle('kategorien'));
   daten.vorlagen = sichtbar(await dbAlle('vorlagen'));
   daten.kredite = sichtbar(await dbAlle('kredite'));
+  daten.wuensche = sichtbar(await dbAlle('wuensche'));
   const e = await dbAlle('einstellungen');
   daten.einst = { ...STANDARD_EINST, ...(e[0] || {}) };
 }
@@ -209,6 +290,17 @@ const STANDARD_EINST = {
   kontoStand: null,        // Girokonto: zuletzt eingetragener echter Stand (Cent)
   kontoStichtag: null,     // an welchem Tag eingetragen ("2026-11-14")
   kontoZeit: 0,            // genauer Zeitpunkt (ms), für Buchungen am selben Tag
+  // --- neu in 2.0 ---
+  zielTermin: null,        // Wunschtermin fürs Sparziel ("2027-06"), optional
+  zielAnzeigen: true,      // Notgroschen/Sparziel als Karte ganz oben zeigen
+  kontoUntergrenze: 20000, // Wünsche: Girokonto soll am Monatsende nicht unter 200 € fallen
+  stundenlohn: 0,          // Netto-Stundenlohn (Cent) → "entspricht ca. 18 Arbeitsstunden"
+  pauseGrenze: 10000,      // Spaß-Käufe ab 100 € erst nach einer Gedanken-Pause grün
+  akzent: 'violett',       // Akzentfarbe der App
+  amoled: false,           // echtes Schwarz
+  startScreen: 'taeglich', // Start-Bildschirm: 'immer' | 'taeglich' | 'aus'
+  rueckblickGesehen: null, // Monat, dessen Rückblick weggetippt wurde
+  meilensteine: {},        // { zielId: 50 } → höchster schon gefeierter Meilenstein
 };
 
 async function startdatenAnlegen() {
@@ -336,6 +428,7 @@ async function vorlagenUebernehmen(m) {
     await speichern('buchungen', {
       id: neueId(), erstellt: Date.now(), datum: vorlageDatum(v.tag, m), betrag: vorlageBetrag(v, m),
       art: v.art || 'ausgabe', kategorieId: v.kategorieId, notiz: v.name, vorlageId: v.id,
+      ...(v.wunschId ? { wunschId: v.wunschId } : {}), // Sparrate für einen Wunsch → landet im Spartopf
     });
   }
   toast(`${liste.length} Buchung${liste.length === 1 ? '' : 'en'} eingetragen ✓`);
@@ -523,6 +616,311 @@ function backupFaellig() {
   return tage > 30;
 }
 
+
+/* ---------------------------------------------------------------------
+   4d. Wünsche & Traum-Projekte
+   Ein Wunsch hat einen Preis. Ein Traum-Projekt (z. B. Japan-Tour) besteht
+   aus mehreren Teilen (Rad, Flug, Ausrüstung …), der Preis ist die Summe.
+   Spartopf: Startbetrag + alle Spar-Buchungen mit diesem Wunsch (wunschId).
+   Beim Kauf wird der Spartopf wieder geleert (Spar-Buchung mit Minus = Entnahme).
+   --------------------------------------------------------------------- */
+
+const PRIOS = [['muss', 'Muss sein'], ['schoen', 'Wäre schön'], ['spass', 'Spaß']];
+const prioName = (p) => (PRIOS.find(([k]) => k === p) || PRIOS[1])[1];
+
+// Gesamtpreis: Wunsch = Preis, Projekt = Summe aller Teile
+const wunschGesamt = (w) => (w.typ === 'projekt'
+  ? (w.teile || []).reduce((s, t) => s + (t.preis || 0), 0) : (w.preis || 0));
+// Schon gekaufte Teile eines Projekts
+const wunschGekauft = (w) => (w.typ === 'projekt'
+  ? (w.teile || []).filter((t) => t.gekauft).reduce((s, t) => s + (t.preis || 0), 0) : 0);
+// Spartopf = Startbetrag + Einzahlungen − Entnahmen
+const wunschGespart = (w) => (w.startGespart || 0) + daten.buchungen
+  .filter((b) => b.wunschId === w.id && b.art === 'sparen').reduce((s, b) => s + b.betrag, 0);
+// Was noch fehlt
+const wunschRest = (w) => Math.max(0, wunschGesamt(w) - wunschGekauft(w) - wunschGespart(w));
+// Fortschritt 0…1
+function wunschAnteil(w) {
+  const g = wunschGesamt(w);
+  return g > 0 ? Math.min(1, (wunschGekauft(w) + Math.max(0, wunschGespart(w))) / g) : 0;
+}
+const offeneWuensche = () => daten.wuensche.filter((w) => w.status !== 'erfuellt')
+  .sort((a, b) => (a.reihenfolge ?? 0) - (b.reihenfolge ?? 0));
+// Monatliche Sparrate, die als regelmäßige Buchung für diesen Wunsch angelegt ist
+const wunschSparrate = (w) => Math.round(daten.vorlagen.filter((v) => v.wunschId === w.id)
+  .reduce((s, v) => s + v.betrag / (v.intervall || 1), 0));
+const wunschEmoji = (w) => w.emoji || (w.typ === 'projekt' ? '✨' : '🎁');
+
+// "entspricht ca. 18 Arbeitsstunden" (Netto-Stundenlohn steht in den Einstellungen)
+function arbeitsstunden(cent) {
+  const lohn = daten.einst.stundenlohn;
+  if (!lohn || cent <= 0) return null;
+  const h = cent / lohn;
+  if (h < 1) return `ca. ${Math.max(1, Math.round(h * 60))} Arbeitsminuten`;
+  return `ca. ${h.toLocaleString('de-DE', { maximumFractionDigits: h < 10 ? 1 : 0 })} Arbeitsstunden`;
+}
+
+// Gedanken-Pause gegen Spontankäufe: Spaß-Käufe über der Grenze erst nach 7 Tagen grün,
+// richtig teure (ab 5× Grenze) erst nach 30 Tagen. Gibt die noch offenen Tage zurück.
+function pauseTageOffen(w) {
+  const grenze = daten.einst.pauseGrenze;
+  if (w.prio !== 'spass' || !grenze || wunschGesamt(w) <= grenze) return 0;
+  const tage = wunschGesamt(w) > grenze * 5 ? 30 : 7;
+  const vergangen = Math.floor((Date.now() - (w.angelegt || Date.now())) / 86400000);
+  return Math.max(0, tage - vergangen);
+}
+
+// Soll für den Notgroschen: das Sparziel (wenn es der Puffer ist), sonst 3 Monatsausgaben
+function notgroschenSoll() {
+  const e = daten.einst;
+  if (e.zielGleichPuffer && e.zielBetrag > 0) return e.zielBetrag;
+  return Math.round(durchschnittAusgaben(heute().slice(0, 7)).schnitt * 3);
+}
+// Wie viele Monate reicht ein Betrag bei den üblichen Ausgaben? (null = keine Daten)
+function pufferMonate(betrag) {
+  const d = durchschnittAusgaben(heute().slice(0, 7)).schnitt;
+  return d > 0 ? betrag / d : null;
+}
+const monateText = (x) => x.toLocaleString('de-DE', { maximumFractionDigits: 1 });
+const aufrunden = (cent, schritt) => Math.ceil(cent / schritt) * schritt;
+
+/* Plan für alle offenen Wünsche, der Reihe nach (Reihenfolge änderbar):
+   Jetzt verfügbar = Girokonto am Monatsende über der Untergrenze
+                   + was auf dem Notgroschen über dem Soll liegt.
+   Jeden weiteren Monat kommt der Überschuss aus dem Ausblick (prognose) dazu.
+   "Wäre schön" und "Spaß" kommen erst dran, wenn der Notgroschen voll ist,
+   "Muss sein" darf vorher. Ergebnis: { [wunschId]: { ampel, ab, text, … } } */
+function wunschPlan() {
+  const e = daten.einst;
+  const jetzt = heute().slice(0, 7);
+  const konto = kontoInfo();
+  const p = prognose(36);
+  const soll = notgroschenSoll();
+  const luecke = Math.max(0, soll - e.puffer);
+  const ueberSoll = Math.max(0, e.puffer - soll);
+  const kontoFrei = konto ? Math.max(0, konto.ende - e.kontoUntergrenze) : Math.max(0, p[0].frei);
+  const startTopf = kontoFrei + ueberSoll;
+  const kumuliert = []; // Überschuss, der bis Monat i insgesamt dazukommt
+  let summe = 0;
+  for (let i = 0; i < p.length; i++) { if (i > 0) summe += Math.max(0, p[i].frei); kumuliert.push(summe); }
+  const freiSchnitt = Math.round(p.slice(1, 13).reduce((s, r) => s + r.frei, 0) / 12);
+  const pmJetzt = pufferMonate(e.puffer);
+
+  const plan = {};
+  let verbraucht = 0;
+  for (const w of offeneWuensche()) {
+    const rest = wunschRest(w);
+    const rate = wunschSparrate(w);
+    const reserve = w.prio === 'muss' ? 0 : luecke;
+    const jetztDa = Math.max(0, startTopf - verbraucht - reserve);
+    let i = null;
+    for (let m = 0; m < p.length; m++) {
+      if (startTopf + kumuliert[m] - verbraucht - reserve + rate * m >= rest) { i = m; break; }
+    }
+    if (i !== null) verbraucht += Math.max(0, rest - rate * i);
+
+    const r = { rest, monat: i, ab: i === null ? null : monatVerschieben(jetzt, i), pause: pauseTageOffen(w) };
+    // Was würde ein Sofort-Kauf mit dem Notgroschen machen?
+    const fehlt = Math.max(0, rest - jetztDa);
+    let sofort = '';
+    if (fehlt > 0) {
+      if (fehlt > e.puffer + (konto ? Math.max(0, konto.ende) : 0)) sofort = 'Sofort gekauft würde dein Konto ins Minus rutschen.';
+      else if (pmJetzt !== null && e.puffer > 0) {
+        sofort = `Sofort gekauft reicht dein Puffer nur noch für ${monateText(pufferMonate(Math.max(0, e.puffer - fehlt)))} statt ${monateText(pmJetzt)} Monate.`;
+      } else sofort = `Sofort gekauft müsstest du ${euro(fehlt)} aus dem Notgroschen nehmen.`;
+    }
+    if (rest === 0) { r.ampel = 'gruen'; r.titel = 'Jetzt okay'; r.text = 'Der Spartopf ist voll – du kannst zuschlagen.'; }
+    else if (i === 0 && r.pause) {
+      r.ampel = 'gelb'; r.titel = `Noch ${r.pause} Tag${r.pause > 1 ? 'e' : ''} überlegen`;
+      r.text = 'Das Geld wäre da – aber bei Spaß-Käufen lohnt sich eine kurze Bedenkzeit gegen Spontankäufe.';
+    } else if (i === 0) {
+      r.ampel = 'gruen'; r.titel = 'Jetzt okay';
+      r.text = konto
+        ? `Am Monatsende bleiben dir danach noch ca. ${euroRund(Math.max(e.kontoUntergrenze, konto.ende - Math.min(rest, kontoFrei)))} auf dem Konto, dein Notgroschen bleibt unangetastet.`
+        : 'Dein Überschuss reicht – der Notgroschen bleibt voll.';
+    } else if (i !== null && i <= 12) {
+      r.ampel = 'gelb'; r.titel = `Ab ${monatName(r.ab)} sinnvoll`;
+      r.text = `In ${i} Monat${i > 1 ? 'en' : ''} ohne Abstriche drin${reserve > 0 ? ' (vorher wird der Notgroschen aufgefüllt)' : ''}. ${sofort}`;
+    } else {
+      r.ampel = 'rot'; r.titel = 'Gerade nicht';
+      r.text = i !== null ? `Frühestens ab ${monatName(r.ab)} drin. ${sofort}`
+        : freiSchnitt <= 0 ? `Im Schnitt bleibt dir monatlich nichts übrig. ${sofort}`
+        : `Mit deinem jetzigen Überschuss nicht in 3 Jahren drin. ${sofort}`;
+    }
+    // Ansparen statt sofort: passende Monatsrate vorschlagen
+    if (rest > 0) {
+      let monate;
+      if (w.termin && w.termin > jetzt) monate = monatsAbstand(jetzt, w.termin);
+      else monate = Math.min(12, Math.max(3, i ?? 12));
+      r.rateVorschlag = aufrunden(rest / monate, 500);
+      r.rateZiel = monatVerschieben(jetzt, Math.ceil(rest / r.rateVorschlag));
+      if (w.termin && (r.ab === null || r.ab > w.termin)) {
+        r.terminHinweis = `Für deinen Wunschtermin (${monatName(w.termin)}) bräuchtest du ca. ${euroRund(r.rateVorschlag)} im Monat.`;
+      }
+    }
+    plan[w.id] = r;
+  }
+  return plan;
+}
+
+/* ---------------------------------------------------------------------
+   4e. Ziele (die großen Karten ganz oben in der Übersicht)
+   - Traum/Wünsche, die du mit ⭐ als Ziel markiert hast
+   - darunter als Basis dein Notgroschen bzw. Sparziel aus den Einstellungen
+   Tempo = Ø Einzahlungen pro Monat (letzte 3 Monate mit Buchungen) oder die Sparrate.
+   --------------------------------------------------------------------- */
+
+function sparSumme(m, zielId) {
+  return buchungenImMonat(m).filter((b) => b.art === 'sparen'
+    && (zielId === 'notgroschen' ? !b.wunschId : b.wunschId === zielId)).reduce((s, b) => s + b.betrag, 0);
+}
+function zielTempo(zielId) {
+  const jetzt = heute().slice(0, 7);
+  const werte = [];
+  for (let i = 1; i <= 12 && werte.length < 3; i++) {
+    const m = monatVerschieben(jetzt, -i);
+    if (buchungenImMonat(m).length) werte.push(sparSumme(m, zielId));
+  }
+  const schnitt = werte.length ? werte.reduce((s, x) => s + x, 0) / werte.length : 0;
+  const rate = zielId === 'notgroschen'
+    ? daten.vorlagen.filter((v) => v.art === 'sparen' && !v.wunschId).reduce((s, v) => s + v.betrag / (v.intervall || 1), 0)
+    : wunschSparrate(daten.wuensche.find((w) => w.id === zielId) || {});
+  return Math.round(Math.max(schnitt, rate, 0));
+}
+
+function alleZiele() {
+  const e = daten.einst;
+  const jetzt = heute().slice(0, 7);
+  const ziele = offeneWuensche().filter((w) => w.istZiel).map((w) => ({
+    id: w.id, name: w.name, emoji: wunschEmoji(w), betrag: wunschGesamt(w),
+    stand: wunschGekauft(w) + Math.max(0, wunschGespart(w)), termin: w.termin || null,
+    tempo: zielTempo(w.id), diesenMonat: sparSumme(jetzt, w.id), wunsch: w,
+  }));
+  if (e.zielAnzeigen !== false) {
+    ziele.push({ id: 'notgroschen', name: e.zielName || 'Notgroschen', emoji: '🛟', betrag: e.zielBetrag,
+      stand: e.zielGleichPuffer ? e.puffer : e.zielStand, termin: e.zielTermin || null,
+      tempo: zielTempo('notgroschen'), diesenMonat: sparSumme(jetzt, 'notgroschen'), basis: true });
+  }
+  return ziele;
+}
+// Das wichtigste Ziel: erster Traum, sonst der Notgroschen (falls noch nicht erreicht)
+const hauptZiel = () => alleZiele().find((z) => z.betrag > 0 && z.stand < z.betrag) || null;
+
+// Wann ist das Ziel erreicht? (extra = zusätzliche Sparsumme pro Monat, für Vorschläge)
+function zielPrognose(z, extra = 0) {
+  if (!(z.betrag > 0)) return { ohneBetrag: true };
+  const rest = z.betrag - z.stand;
+  if (rest <= 0) return { erreicht: true };
+  const tempo = z.tempo + extra;
+  if (tempo <= 0) return { ohneTempo: true, rest };
+  const n = Math.ceil(rest / tempo);
+  if (n > 120) return { zuLang: true, rest }; // über 10 Jahre → kein sinnvolles Datum
+  const monat = monatVerschieben(heute().slice(0, 7), n);
+  let ampel = null;
+  if (z.termin) ampel = monat <= z.termin ? 'gruen' : monat <= monatVerschieben(z.termin, 2) ? 'gelb' : 'rot';
+  return { rest, n, monat, ampel };
+}
+
+// Meilensteine 25 / 50 / 75 / 100 % feiern (jeder nur einmal)
+function meilensteinePruefen() {
+  const e = daten.einst;
+  const m = { ...(e.meilensteine || {}) };
+  let feier = null, geaendert = false;
+  for (const z of alleZiele()) {
+    if (!(z.betrag > 0)) continue;
+    const pct = (z.stand / z.betrag) * 100;
+    const stufe = [100, 75, 50, 25].find((s) => pct >= s) || 0;
+    if (m[z.id] === undefined) { m[z.id] = stufe; geaendert = true; continue; } // erstes Mal: nur merken
+    if (stufe > m[z.id]) { m[z.id] = stufe; geaendert = true; feier ??= { z, stufe }; }
+    else if (stufe < m[z.id]) { m[z.id] = stufe; geaendert = true; }
+  }
+  if (geaendert) { e.meilensteine = m; einstSpeichern(); }
+  if (feier) {
+    konfetti();
+    vibrieren([40, 60, 40]);
+    toast(feier.stufe === 100 ? `🎉 ${feier.z.name}: Ziel erreicht!` : `🎉 ${feier.z.name}: ${feier.stufe} % geschafft!`);
+  }
+}
+function konfetti() {
+  const farben = ['var(--akzent)', '#3ddc97', '#ffd166', '#ff6fae', '#5aa9ff'];
+  for (let i = 0; i < 40; i++) {
+    const k = document.createElement('i');
+    k.className = 'konfetti';
+    k.style.left = `${Math.random() * 100}vw`;
+    k.style.background = farben[i % farben.length];
+    k.style.animationDelay = `${Math.random() * 0.4}s`;
+    k.style.animationDuration = `${1.4 + Math.random()}s`;
+    document.body.appendChild(k);
+    setTimeout(() => k.remove(), 2800);
+  }
+}
+
+/* ---------------------------------------------------------------------
+   4f. Analyse, Schnell-Favoriten, Abos
+   Läuft komplett lokal mit festen Regeln – keine KI, keine Kosten.
+   --------------------------------------------------------------------- */
+
+// Wertet die letzten "anzahl" abgeschlossenen Monate aus (nur Monate mit Buchungen)
+function analyse(anzahl) {
+  const jetzt = heute().slice(0, 7);
+  const monate = [];
+  for (let i = 1; i <= anzahl; i++) {
+    const m = monatVerschieben(jetzt, -i);
+    if (buchungenImMonat(m).length) monate.push(m);
+  }
+  const n = monate.length;
+  const zahlen = monate.map(monatsZahlen);
+  const summe = (f) => zahlen.reduce((s, z) => s + f(z), 0);
+  const proKat = {};
+  zahlen.forEach((z, idx) => {
+    for (const [id, b] of Object.entries(z.proKat)) {
+      proKat[id] ??= { id, summe: 0, je: {} };
+      proKat[id].summe += b;
+      proKat[id].je[monate[idx]] = b;
+    }
+  });
+  const gesamtAus = summe((z) => z.ausgaben);
+  const aktuell = monatsZahlen(jetzt);
+  const kats = Object.values(proKat).map((x) => ({
+    ...x, kat: kat(x.id) || { name: 'Gelöschte Kategorie', farbe: '#666' },
+    schnitt: n ? x.summe / n : 0, anteil: gesamtAus ? x.summe / gesamtAus : 0,
+    letzter: x.je[monate[0]] || 0, davor: x.je[monate[1]] || 0, aktuell: aktuell.proKat[x.id] || 0,
+  })).sort((a, b) => b.summe - a.summe);
+  return {
+    jetzt, monate, n, zahlen, kats, aktuell,
+    schnittAus: n ? gesamtAus / n : 0, schnittEin: n ? summe((z) => z.einnahmen) / n : 0,
+    schnittFix: n ? summe((z) => z.fix) / n : 0, schnittSpar: n ? summe((z) => z.gespart) / n : 0,
+  };
+}
+
+// Häufige Buchungen der letzten 4 Monate (gleiche Notiz + Kategorie, mind. 2×) → mit einem Tipp buchen
+function favoriten() {
+  const h = heute();
+  const ab = tagVerschieben(h, -120);
+  const gruppen = {};
+  for (const b of daten.buchungen) {
+    if (b.art !== 'ausgabe' || b.vorlageId || b.datum < ab || b.datum > h || kat(b.kategorieId)?.fix) continue;
+    const name = (b.notiz || '').trim();
+    if (!name) continue;
+    const key = `${name.toLowerCase()}|${b.kategorieId}`;
+    gruppen[key] ??= { name, kategorieId: b.kategorieId, anzahl: 0, betraege: {} };
+    gruppen[key].anzahl++;
+    gruppen[key].betraege[b.betrag] = (gruppen[key].betraege[b.betrag] || 0) + 1;
+  }
+  return Object.values(gruppen).filter((g) => g.anzahl >= 2 && kat(g.kategorieId))
+    .map((g) => ({ ...g, betrag: Number(Object.entries(g.betraege).sort((a, b) => b[1] - a[1])[0][0]) }))
+    .sort((a, b) => b.anzahl - a.anzahl).slice(0, 6);
+}
+
+// Alle regelmäßigen Kosten (Abos, Versicherungen, Raten …) umgerechnet auf Monat und Jahr
+function abos() {
+  return daten.vorlagen.filter((v) => (v.art || 'ausgabe') === 'ausgabe')
+    .map((v) => ({ v, monat: v.betrag / (v.intervall || 1), jahr: (v.betrag * 12) / (v.intervall || 1) }))
+    .sort((a, b) => b.jahr - a.jahr);
+}
+// Seit über einem Jahr nicht angefasst/geprüft?
+const aboAlt = (v) => (Date.now() - (v.geprueft || v.geaendert || Date.now())) > 365 * 86400000;
+
 /* ---------------------------------------------------------------------
    5. Ansichten
    Jede Ansicht ist eine Funktion, die HTML-Text zurückgibt.
@@ -531,19 +929,66 @@ function backupFaellig() {
 
 let ansicht = 'uebersicht';
 let aktMonat = heute().slice(0, 7);
+let auswertungTab = 'analyse';   // analyse | ausblick | abos
+let letzteAnsicht = '';          // für Animationen nur beim Wechsel
+
+// Untere Navigation: 4 Tabs + runder Plus-Knopf in der Mitte
+const NAV = [['uebersicht', 'start', 'Übersicht'], ['buchungen', 'liste', 'Buchungen'], null,
+  ['auswertung', 'auswertung', 'Auswertung'], ['wuensche', 'wunsch', 'Wünsche']];
+function navAufbauen() {
+  document.querySelector('nav.unten').innerHTML = NAV.map((x) => (x
+    ? `<button data-view="${x[0]}"><span class="pille">${icon(x[1])}</span>${x[2]}</button>`
+    : `<button class="fab" data-action="neu" aria-label="Neue Buchung">${icon('plus')}</button>`)).join('');
+  document.getElementById('einst-knopf').innerHTML = icon('zahnrad');
+}
 
 function render() {
+  darstellungAnwenden();
   document.querySelectorAll('nav [data-view]').forEach(
     (b) => b.classList.toggle('aktiv', b.dataset.view === ansicht));
+  document.getElementById('einst-knopf').classList.toggle('aktiv', ansicht === 'einstellungen');
   const mitMonat = ansicht === 'uebersicht' || ansicht === 'buchungen';
   document.getElementById('titel-text').textContent = mitMonat ? monatName(aktMonat)
-    : ansicht === 'ausblick' ? 'Ausblick' : 'Einstellungen';
+    : { auswertung: 'Auswertung', wuensche: 'Wünsche & Träume', einstellungen: 'Einstellungen' }[ansicht];
   document.querySelectorAll('.pfeil').forEach((p) => (p.style.visibility = mitMonat ? 'visible' : 'hidden'));
-  document.getElementById('inhalt').innerHTML =
+  const main = document.getElementById('inhalt');
+  main.innerHTML =
     ansicht === 'uebersicht' ? htmlUebersicht()
     : ansicht === 'buchungen' ? htmlBuchungen()
-    : ansicht === 'ausblick' ? htmlAusblick()
+    : ansicht === 'auswertung' ? htmlAuswertung()
+    : ansicht === 'wuensche' ? htmlWuensche()
     : htmlEinstellungen();
+
+  // Animationen nur, wenn die Seite oder der Monat gewechselt wurde (nicht bei jeder Kleinigkeit)
+  const schluessel = `${ansicht}|${aktMonat}|${auswertungTab}`;
+  if (schluessel !== letzteAnsicht) {
+    letzteAnsicht = schluessel;
+    main.classList.remove('einblenden'); void main.offsetWidth; main.classList.add('einblenden');
+    animieren(main);
+  }
+  if (ansicht === 'uebersicht') { karussellStarten(); meilensteinePruefen(); }
+}
+
+// Beträge hochzählen lassen + Ringe füllen
+function animieren(box) {
+  box.querySelectorAll('.ring circle[data-ziel-offset]').forEach((c) => {
+    const ziel = c.dataset.zielOffset;
+    c.style.transition = 'none';
+    c.setAttribute('stroke-dashoffset', c.getAttribute('stroke-dasharray'));
+    void c.getBoundingClientRect();
+    c.style.transition = '';
+    requestAnimationFrame(() => c.setAttribute('stroke-dashoffset', ziel));
+  });
+  box.querySelectorAll('[data-zaehlen]').forEach((el) => {
+    const ziel = Number(el.dataset.zaehlen);
+    const t0 = performance.now();
+    const schritt = (t) => {
+      const x = Math.min(1, (t - t0) / 650);
+      el.innerHTML = euroHtml(Math.round(ziel * (1 - Math.pow(1 - x, 3))));
+      if (x < 1) requestAnimationFrame(schritt);
+    };
+    requestAnimationFrame(schritt);
+  });
 }
 
 const prozent = (x) => (x * 100).toLocaleString('de-DE', { maximumFractionDigits: 0 }) + ' %';
@@ -554,7 +999,7 @@ function htmlKonto() {
   const k = kontoInfo();
   if (kontoBearbeiten || !k) {
     return `<section class="karte">
-      <div class="label">🏦 Girokonto – aktueller Stand laut Banking-App (€)</div>
+      <div class="label">${icon('bank')} Girokonto – aktueller Stand laut Banking-App (€)</div>
       <input type="text" inputmode="decimal" id="konto-eingabe" style="margin:8px 0" placeholder="z. B. 1.234,56"
         value="${k ? centZuText(k.stand) : ''}">
       <div class="knopfreihe" style="margin-top:0">
@@ -566,101 +1011,196 @@ function htmlKonto() {
   }
   const seit = new Date(e.kontoStichtag).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
   return `<section class="karte">
-    <div class="zeile"><span class="label">🏦 Girokonto heute</span>
-      <button class="x" data-action="konto-bearbeiten" aria-label="Kontostand abgleichen">✎</button></div>
-    <div class="zahl mittel ${k.stand < 0 ? 'rot' : ''}" style="margin-top:-4px">${euro(k.stand)}</div>
+    <div class="zeile"><span class="label">${icon('bank')} Girokonto heute</span>
+      <button class="x" data-action="konto-bearbeiten" aria-label="Kontostand abgleichen">${icon('stift')}</button></div>
+    <div class="zahl mittel ${k.stand < 0 ? 'rot' : ''}" style="margin-top:-4px">${euroHtml(k.stand)}</div>
     ${k.ende !== k.stand ? `<div>Monatsende voraussichtlich <b class="${k.ende < 0 ? 'rot' : ''}">${euro(k.ende)}</b></div>` : ''}
     <div class="klein grau" style="margin-top:4px">Mit der Bank abgeglichen am ${seit} · seitdem eingetragene Buchungen sind eingerechnet</div>
   </section>`;
 }
 
+// --- Ziel-Karten ganz oben (wischen oder automatisch weiterdrehen) ---
+function htmlZielKarte(z) {
+  const anteil = z.betrag > 0 ? Math.min(1, z.stand / z.betrag) : 0;
+  const pr = zielPrognose(z);
+  let prognoseText;
+  if (pr.ohneBetrag) prognoseText = 'Tippe hier und leg einen Zielbetrag fest';
+  else if (pr.erreicht) prognoseText = '<span class="gruen">Ziel erreicht 🎉</span>';
+  else if (pr.ohneTempo) prognoseText = `Noch ${euro(pr.rest)} – mit einer Sparrate siehst du, wann du es schaffst`;
+  else if (pr.zuLang) prognoseText = `Noch ${euro(pr.rest)} – bei deinem Tempo über 10 Jahre. Eine höhere Sparrate hilft.`;
+  else {
+    prognoseText = `${pr.ampel ? `<span class="ampel ${pr.ampel}"></span>` : ''}Bei deinem Tempo erreicht im <b>${monatName(pr.monat)}</b>`
+      + (pr.ampel ? ` · ${{ gruen: 'im Plan', gelb: 'knapp', rot: 'hinter dem Plan' }[pr.ampel]}` : '');
+  }
+  let monatText;
+  if (z.diesenMonat > 0 && z.diesenMonat >= z.tempo) monatText = `<span class="gruen">+${euro(z.diesenMonat)} diesen Monat 💪</span>`;
+  else if (z.tempo > 0) monatText = `${z.diesenMonat > 0 ? `+${euro(z.diesenMonat)} · ` : ''}noch ${euro(z.tempo - z.diesenMonat)} bis zu deinem Monatsziel`;
+  else monatText = z.diesenMonat > 0 ? `+${euro(z.diesenMonat)} diesen Monat` : 'Diesen Monat noch nichts dafür gespart';
+  if (z.basis && daten.einst.zielGleichPuffer && daten.einst.puffer > 0) {
+    const pm = pufferMonate(daten.einst.puffer);
+    if (pm !== null) monatText += ` · Puffer reicht für ${monateText(pm)} Monate`;
+  }
+  const label = z.basis ? 'Basis' : z.wunsch?.typ === 'projekt' ? 'Mein Traum' : 'Mein Ziel';
+  return `<section class="karte zielkarte tippbar" data-action="ziel-details" data-id="${z.id}">
+    <div class="ziel-kopf">
+      ${ringSvg(anteil, 96)}
+      <div style="flex:1;min-width:0">
+        <div class="label">${label}</div>
+        <div class="ziel-name"><span class="ziel-emoji">${esc(z.emoji)}</span> ${esc(z.name)}</div>
+        <div style="margin-top:4px"><b>${euroHtml(z.stand)}</b> <span class="klein grau">von ${euro(z.betrag)}</span></div>
+      </div>
+    </div>
+    <div class="klein" style="margin-top:12px">${prognoseText}</div>
+    <div class="klein grau" style="margin-top:2px">${monatText}</div>
+  </section>`;
+}
+function htmlZiele() {
+  const ziele = alleZiele();
+  if (!ziele.length) return '';
+  return `<div class="ziele" id="ziele">${ziele.map(htmlZielKarte).join('')}</div>
+    ${ziele.length > 1 ? `<div class="punkte">${ziele.map(() => '<i></i>').join('')}</div>` : ''}`;
+}
+let karussellTimer = null, karussellBeruehrt = 0, karussellIndex = 0;
+function karussellStarten() {
+  clearInterval(karussellTimer);
+  const box = document.getElementById('ziele');
+  if (!box) return;
+  const n = box.children.length;
+  const schritt = () => (n > 1 ? box.children[1].offsetLeft - box.children[0].offsetLeft : box.clientWidth);
+  const punkte = () => {
+    karussellIndex = Math.min(n - 1, Math.round(box.scrollLeft / schritt()));
+    document.querySelectorAll('.punkte i').forEach((p, j) => p.classList.toggle('an', j === karussellIndex));
+  };
+  if (karussellIndex >= n) karussellIndex = 0;
+  box.scrollLeft = karussellIndex * schritt();
+  box.addEventListener('scroll', punkte, { passive: true });
+  box.addEventListener('touchstart', () => (karussellBeruehrt = Date.now()), { passive: true });
+  box.addEventListener('pointerdown', () => (karussellBeruehrt = Date.now()));
+  punkte();
+  if (n < 2) return;
+  karussellTimer = setInterval(() => {
+    if (!document.body.contains(box)) { clearInterval(karussellTimer); return; }
+    if (document.hidden || sheetOffen || Date.now() - karussellBeruehrt < 10000) return;
+    box.scrollTo({ left: ((karussellIndex + 1) % n) * schritt(), behavior: 'smooth' });
+  }, 6000);
+}
+
+// Monatsrückblick: in den ersten 10 Tagen eines Monats eine Karte zum Vormonat
+function htmlRueckblick() {
+  const jetzt = heute().slice(0, 7);
+  if (aktMonat !== jetzt || Number(heute().slice(8)) > 10) return '';
+  const vm = monatVerschieben(jetzt, -1);
+  if (daten.einst.rueckblickGesehen === vm) return '';
+  const z = monatsZahlen(vm);
+  if (!z.anzahl) return '';
+  const vv = monatsZahlen(monatVerschieben(vm, -1));
+  const top = Object.entries(z.proKat).sort((a, b) => b[1] - a[1])[0];
+  const v = vv.ausgaben > 0 ? (z.ausgaben - vv.ausgaben) / vv.ausgaben : null;
+  const name = MONATE[Number(vm.slice(5)) - 1];
+  return `<section class="karte hero">
+    <div class="zeile"><h2 style="margin:0">${icon('kalender')} Dein ${name}</h2>
+      <button class="x" data-action="rueckblick-weg" aria-label="Ausblenden">${icon('kreuz')}</button></div>
+    <div style="margin-top:8px;font-size:1.05rem">${z.gespart > 0 ? `<b class="blau">${euro(z.gespart)}</b> gespart 💪` : 'Nichts aufs Sparkonto gelegt'}
+      ${z.sparquote !== null ? `· Sparquote <b>${prozent(z.sparquote)}</b>` : ''}</div>
+    <div class="klein" style="margin-top:4px">Ausgaben ${euro(z.ausgaben)}${v !== null ? ` <span class="${v <= 0 ? 'gruen' : 'rot'}">(${v > 0 ? '+' : ''}${prozent(v)} ggü. Vormonat)</span>` : ''}</div>
+    ${top ? `<div class="klein">Größte Kategorie: <b>${esc(kat(top[0])?.name || '?')}</b> (${euro(top[1])})</div>` : ''}
+  </section>`;
+}
+
+function htmlBudgets(z) {
+  const mitBudget = kategorienVon('ausgabe').filter((k) => k.budget > 0);
+  if (!mitBudget.length) return '';
+  return `<section class="karte"><h2>${icon('ziel')} Budgets</h2>` + mitBudget.map((k) => {
+    const aus = z.proKat[k.id] || 0;
+    const a = aus / k.budget;
+    const stufe = a >= 1 ? 'rot' : a >= 0.8 ? 'gelb' : 'gruen';
+    return `<div class="katzeile">
+      <div class="zeile"><span><span class="punkt" style="background:${esc(k.farbe)}"></span>${esc(k.name)}</span>
+        <span>${euro(aus)} <span class="klein grau">/ ${euro(k.budget)}</span></span></div>
+      <div class="leiste"><span style="width:${Math.min(100, a * 100)}%;background:var(--${stufe})"></span></div>
+      <div class="klein ${stufe === 'gruen' ? 'grau' : stufe}">${a >= 1 ? `${euro(aus - k.budget)} über dem Budget`
+        : a >= 0.8 ? `⚠ ${prozent(a)} verbraucht – noch ${euro(k.budget - aus)}` : `noch ${euro(k.budget - aus)}`}</div>
+    </div>`;
+  }).join('') + '</section>';
+}
+
 function htmlUebersicht() {
   const z = monatsZahlen(aktMonat);
   const e = daten.einst;
-  let h = '';
+  const jetzt = heute().slice(0, 7);
+  let h = htmlZiele();
 
-  // Hinweise oben
+  // Hinweise
   const fehlend = fehlendeVorlagen(aktMonat);
   if (fehlend.length) {
-    h += `<button class="hinweis" data-action="vorlagen-uebernehmen">📌 ${fehlend.length} regelmäßige Buchung${fehlend.length > 1 ? 'en' : ''} für ${monatName(aktMonat)} eintragen
+    h += `<button class="hinweis" data-action="vorlagen-uebernehmen">${icon('pin')} ${fehlend.length} regelmäßige Buchung${fehlend.length > 1 ? 'en' : ''} für ${monatName(aktMonat)} eintragen
       <div class="klein grau" style="margin-top:4px">${fehlend.map((v) => esc(v.name)
         + (vorlageBetrag(v, aktMonat) !== v.betrag ? ` (einmalig ${euro(vorlageBetrag(v, aktMonat))})` : '')).join(' · ')}</div></button>`;
   }
-  // Kredite/Verträge, die laut Plan fertig sind → erst nachfragen, dann löschen
   h += kreditFertigHinweise();
   if (backupFaellig()) {
-    h += `<button class="hinweis warn" data-action="export">💾 Backup ist über 30 Tage alt (oder noch nie gemacht). Jetzt sichern</button>`;
+    h += `<button class="hinweis warn" data-action="export">${icon('backup')} Backup ist über 30 Tage alt (oder noch nie gemacht). Jetzt sichern</button>`;
+  }
+  if (!alleZiele().length) {
+    h += `<button class="hinweis" data-view="wuensche">${icon('ziel')} Leg ein Sparziel fest oder markiere einen Wunsch mit ⭐ – dann siehst du hier deinen Fortschritt</button>`;
+  }
+  h += htmlRueckblick();
+
+  // Hero: was diesen Monat noch frei ist
+  h += `<section class="karte hero">
+    <div class="label">Noch frei im ${MONATE[Number(aktMonat.slice(5)) - 1]}</div>
+    <div class="zahl ${z.frei < 0 ? 'rot' : ''}" data-zaehlen="${z.frei}">${euroHtml(z.frei)}</div>
+    <div class="hero-unten klein">
+      <span class="grau">Ein <b class="gruen">${euro(z.einnahmen)}</b></span>
+      <span class="grau">Aus <b class="rot">${euro(z.ausgaben)}</b></span>
+      <span class="grau">Spar <b class="blau">${euro(z.gespart)}</b></span>
+    </div>
+  </section>`;
+
+  // Schnell buchen (häufige Ausgaben mit einem Tipp)
+  const fav = aktMonat === jetzt ? favoriten() : [];
+  if (fav.length) {
+    h += `<section class="karte"><h2>${icon('blitz')} Schnell buchen</h2>
+      <div class="chips" style="margin:0">${fav.map((f) => `<button class="chip schnell" data-action="schnell-buchen"
+        data-name="${esc(f.name)}" data-kat="${f.kategorieId}" data-betrag="${f.betrag}">
+        <span class="punkt" style="background:${esc(kat(f.kategorieId).farbe)}"></span>${esc(f.name)} · ${euro(f.betrag)}</button>`).join('')}</div>
+      <div class="klein grau" style="margin-top:8px">Ein Tipp = heute gebucht</div></section>`;
   }
 
-  // Girokonto (nur im aktuellen Monat)
-  if (aktMonat === heute().slice(0, 7)) h += htmlKonto();
-
-  // Meine Monatszahl
-  const fixAnteil = z.ausgaben ? (z.fix / z.ausgaben) * 100 : 0;
-  h += `<section class="karte">
-    <div class="label">Meine Monatszahl (Ausgaben)</div>
-    <div class="zahl">${euro(z.ausgaben)}</div>
-    <div class="leiste"><span style="width:${fixAnteil}%;background:#ff8a65"></span><span style="width:${100 - fixAnteil}%;background:var(--blau)"></span></div>
-    <div class="zeile klein"><span><span class="punkt" style="background:#ff8a65"></span>Fix ${euro(z.fix)}</span><span><span class="punkt" style="background:var(--blau)"></span>Variabel ${euro(z.variabel)}</span></div>
-  </section>`;
+  if (aktMonat === jetzt) h += htmlKonto();
+  h += htmlBudgets(z);
 
   if (z.anzahl === 0) {
     h += `<div class="leer">Noch keine Buchungen in diesem Monat.<br>Tippe auf <b>+</b>, um etwas einzutragen.</div>`;
   }
 
-  // Einnahmen, gespart, frei, Sparquote
-  const sqFarbe = z.sparquote === null ? '' : z.sparquote >= 0.2 ? 'gruen' : z.sparquote >= 0 ? 'gelb' : 'rot';
-  h += `<div class="raster">
-    <section class="karte"><div class="label">Einnahmen</div><div class="wert gruen">${euro(z.einnahmen)}</div></section>
-    <section class="karte"><div class="label">Sparquote</div><div class="wert ${sqFarbe}">${z.sparquote === null ? '–' : prozent(z.sparquote)}</div></section>
-    <section class="karte"><div class="label">Aufs Sparkonto</div><div class="wert blau">${euro(z.gespart)}</div></section>
-    <section class="karte"><div class="label">Noch frei</div><div class="wert ${z.frei < 0 ? 'rot' : ''}">${euro(z.frei)}</div></section>
-  </div>`;
-
-  // Puffer
-  const d = durchschnittAusgaben(aktMonat);
-  let pufferText, pufferFarbe = '';
-  if (e.puffer <= 0) {
-    pufferText = 'Trag in den Einstellungen ein, wie viel auf deinem Notgroschen-Konto liegt.';
-  } else if (d.schnitt <= 0) {
-    pufferText = 'Sobald du Ausgaben einträgst, siehst du hier, wie lange der Puffer reicht.';
-  } else {
-    const monate = e.puffer / d.schnitt;
-    pufferFarbe = monate >= 3 ? 'gruen' : monate >= 1 ? 'gelb' : 'rot';
-    pufferText = `reicht für <b class="${pufferFarbe}">${monate.toLocaleString('de-DE', { maximumFractionDigits: 1 })} Monate</b> Ausgaben`;
-  }
-  const basis = d.schnitt > 0
-    ? (d.nurAktuell ? `Basis: Ausgaben dieses Monats (${euro(d.schnitt)})` : `Basis: Ø ${euro(d.schnitt)} der letzten ${d.monate} Monat${d.monate > 1 ? 'e' : ''}`)
-    : '';
-  h += `<section class="karte tippbar" data-view="einstellungen">
-    <div class="label">Puffer (Notgroschen)</div>
-    <div class="zahl mittel">${euro(e.puffer)}</div>
-    <div>${pufferText}</div>
-    ${basis ? `<div class="klein grau" style="margin-top:4px">${basis}</div>` : ''}
+  // Meine Monatszahl
+  const fixAnteil = z.ausgaben ? (z.fix / z.ausgaben) * 100 : 0;
+  h += `<section class="karte">
+    <div class="label">Meine Monatszahl (Ausgaben)</div>
+    <div class="zahl">${euroHtml(z.ausgaben)}</div>
+    <div class="leiste"><span style="width:${fixAnteil}%;background:#ff8a65"></span><span style="width:${100 - fixAnteil}%;background:var(--akzent)"></span></div>
+    <div class="zeile klein"><span><span class="punkt" style="background:#ff8a65"></span>Fix ${euro(z.fix)}</span><span><span class="punkt" style="background:var(--akzent)"></span>Variabel ${euro(z.variabel)}</span></div>
   </section>`;
 
-  // Sparziel
-  if (e.zielBetrag > 0) {
-    const stand = e.zielGleichPuffer ? e.puffer : e.zielStand;
-    const anteil = Math.min(stand / e.zielBetrag, 1);
-    h += `<section class="karte tippbar" data-view="einstellungen">
-      <div class="zeile"><span class="label">Sparziel: ${esc(e.zielName)}</span><b>${prozent(anteil)}</b></div>
-      <div class="leiste" style="height:14px;border-radius:7px"><span style="width:${anteil * 100}%;background:var(--gruen)"></span></div>
-      <div class="zeile klein grau"><span>${euro(stand)}</span><span>Ziel ${euro(e.zielBetrag)}</span></div>
-      ${stand < e.zielBetrag ? `<div class="klein" style="margin-top:4px">Noch ${euro(e.zielBetrag - stand)}</div>` : '<div class="klein gruen" style="margin-top:4px">Ziel erreicht 🎉</div>'}
-    </section>`;
-  } else {
-    h += `<button class="hinweis" data-view="einstellungen">🎯 Leg in den Einstellungen ein Sparziel fest</button>`;
-  }
+  // Sparquote + Puffer
+  const sqFarbe = z.sparquote === null ? '' : z.sparquote >= 0.2 ? 'gruen' : z.sparquote >= 0 ? 'gelb' : 'rot';
+  const d = durchschnittAusgaben(aktMonat);
+  const pm = e.puffer > 0 && d.schnitt > 0 ? e.puffer / d.schnitt : null;
+  h += `<div class="raster">
+    <section class="karte"><div class="label">Sparquote</div><div class="wert ${sqFarbe}">${z.sparquote === null ? '–' : prozent(z.sparquote)}</div></section>
+    <section class="karte tippbar" data-view="einstellungen"><div class="label">Puffer ${euro(e.puffer)}</div>
+      <div class="wert ${pm === null ? '' : pm >= 3 ? 'gruen' : pm >= 1 ? 'gelb' : 'rot'}">${pm === null ? '–' : `${monateText(pm)} Mon.`}</div></section>
+  </div>`;
 
   // Ausgaben nach Kategorien
   const katListe = Object.entries(z.proKat).sort((a, b) => b[1] - a[1]);
   if (katListe.length) {
     const max = katListe[0][1];
-    h += `<section class="karte"><h2>Ausgaben nach Kategorien</h2>` + katListe.map(([id, summe]) => {
+    h += `<section class="karte"><h2>${icon('kategorie')} Ausgaben nach Kategorien</h2>` + katListe.map(([id, summe]) => {
       const k = kat(id) || { name: 'Gelöschte Kategorie', farbe: '#666' };
       return `<div class="katzeile">
-        <div class="zeile"><span><span class="punkt" style="background:${esc(k.farbe)}"></span>${esc(k.name)}${k.fix ? ' <span class="klein grau">fix</span>' : ''}</span>
+        <div class="zeile"><span><span class="punkt" style="background:${esc(k.farbe)}"></span>${esc(k.name)}${k.fix ? ' <span class="badge">fix</span>' : ''}</span>
         <span>${euro(summe)} <span class="klein grau">${prozent(summe / z.ausgaben)}</span></span></div>
         <div class="leiste"><span style="width:${(summe / max) * 100}%;background:${esc(k.farbe)}"></span></div>
       </div>`;
@@ -672,7 +1212,7 @@ function htmlUebersicht() {
     const infos = daten.kredite.map((k) => ({ k, i: kreditInfo(k) }));
     const raten = infos.filter((x) => x.i.raten > 0).reduce((s, x) => s + x.k.rate, 0);
     const offen = infos.reduce((s, x) => s + (x.i.offen || 0), 0);
-    h += `<section class="karte"><h2>Kredite & Verträge</h2>
+    h += `<section class="karte"><h2>${icon('karte')} Kredite & Verträge</h2>
       <div class="zeile"><span>Raten pro Monat</span><b>${euro(raten)}</b></div>
       <div class="zeile"><span>Insgesamt noch zu zahlen</span><b class="rot">${euro(offen)}</b></div>
       ${infos.map(({ k, i }) => {
@@ -693,7 +1233,7 @@ function htmlUebersicht() {
   // Kleine Ausgaben, die sich summieren
   const klein = kleineAusgaben(aktMonat);
   if (klein.anzahl > 0) {
-    h += `<section class="karte"><h2>Kleine Ausgaben (bis ${euro(e.kleinGrenze)})</h2>
+    h += `<section class="karte"><h2>${icon('suche')} Kleine Ausgaben (bis ${euro(e.kleinGrenze)})</h2>
       <div class="zeile"><span>${klein.anzahl} kleine Ausgaben</span><b>${euro(klein.summe)}</b></div>
       ${klein.mehrfach.map((g) => `<div class="zeile klein" style="margin-top:6px"><span class="grau">${esc(g.name)} · ${g.anzahl}×</span><span>${euro(g.summe)}</span></div>`).join('')}
       <div class="klein grau" style="margin-top:8px">Hochgerechnet aufs Jahr: ca. ${euro(klein.summe * 12)}</div>
@@ -703,7 +1243,7 @@ function htmlUebersicht() {
 }
 
 /* ---------------------------------------------------------------------
-   5b. Ausblick (Prognose)
+   5a. Ausblick (Prognose) – Teil der Auswertung
    Für jeden kommenden Monat wird zusammengerechnet:
      + eingetragene Buchungen (auch geplante mit Datum in der Zukunft)
      + regelmäßige Buchungen, die fällig, aber noch nicht eingetragen sind
@@ -813,27 +1353,328 @@ function htmlAusblick() {
   return h;
 }
 
+// --- Buchungen: Suche & Filter, gruppiert nach Tag, nach links wischen = löschen ---
+let suchText = '', suchKat = '';
 function htmlBuchungen() {
-  const liste = buchungenImMonat(aktMonat).sort((a, b) => b.datum.localeCompare(a.datum));
-  if (!liste.length) return `<div class="leer">Keine Buchungen in ${monatName(aktMonat)}.</div>`;
-  const z = monatsZahlen(aktMonat);
+  const kats = [...kategorienVon('ausgabe'), ...kategorienVon('einnahme'), ...kategorienVon('sparen')];
+  return `<div class="suche">
+      <input type="search" id="such-feld" placeholder="Suchen: Notiz, Kategorie, Betrag …" value="${esc(suchText)}" autocomplete="off">
+      <select id="such-kat" style="width:auto;max-width:42%"><option value="">Alle</option>
+        ${kats.map((k) => `<option value="${k.id}" ${k.id === suchKat ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}</select>
+    </div>
+    <div id="buchungsliste" style="display:flex;flex-direction:column;gap:12px">${htmlBuchungsliste()}</div>`;
+}
+function buchungPasst(b, suche) {
+  if (!suche) return true;
+  const k = kat(b.kategorieId);
+  if ((b.notiz || '').toLowerCase().includes(suche) || (k?.name || '').toLowerCase().includes(suche)) return true;
+  // Betrag: "12,50" findet genau den Betrag, ">50" alles über 50 €, "<10" alles unter 10 €
+  const vergleich = suche.match(/^([<>])\s*(.+)$/);
+  if (vergleich) {
+    const c = centAusText(vergleich[2]);
+    return c !== null && (vergleich[1] === '>' ? Math.abs(b.betrag) > c : Math.abs(b.betrag) < c);
+  }
+  return centZuText(Math.abs(b.betrag)).includes(suche.replace('€', '').trim());
+}
+function htmlBuchungsliste() {
+  const suche = suchText.trim().toLowerCase();
+  // Mit Suchtext wird in ALLEN Monaten gesucht, sonst nur im gewählten Monat
+  let liste = suche ? [...daten.buchungen] : buchungenImMonat(aktMonat);
+  if (suchKat) liste = liste.filter((b) => b.kategorieId === suchKat);
+  liste = liste.filter((b) => buchungPasst(b, suche)).sort((a, b) => b.datum.localeCompare(a.datum) || (b.erstellt || 0) - (a.erstellt || 0));
+  if (!liste.length) {
+    return `<div class="leer">${suche || suchKat ? 'Nichts gefunden.' : `Keine Buchungen in ${monatName(aktMonat)}.`}</div>`;
+  }
+  let ein = 0, aus = 0, spar = 0;
+  for (const b of liste) { if (b.art === 'einnahme') ein += b.betrag; else if (b.art === 'sparen') spar += b.betrag; else aus += b.betrag; }
   let h = `<section class="karte zeile klein">
-    <span>Ein <b class="gruen">${euro(z.einnahmen)}</b></span>
-    <span>Aus <b class="rot">${euro(z.ausgaben)}</b></span>
-    <span>Spar <b class="blau">${euro(z.gespart)}</b></span></section>`;
-  let letzterTag = '';
+    <span>Ein <b class="gruen">${euro(ein)}</b></span>
+    <span>Aus <b class="rot">${euro(aus)}</b></span>
+    <span>Spar <b class="blau">${euro(spar)}</b></span></section>
+    ${suche ? `<div class="klein grau" style="margin:-4px 4px">${liste.length} Treffer in allen Monaten</div>` : ''}`;
+  // nach Tagen gruppieren
+  const tage = [];
   for (const b of liste) {
-    if (b.datum !== letzterTag) { h += `<div class="tag">${tagAnzeige(b.datum)}</div>`; letzterTag = b.datum; }
-    const k = kat(b.kategorieId) || { name: 'Gelöschte Kategorie', farbe: '#666' };
-    const vorzeichen = b.art === 'einnahme' ? '+' : b.art === 'sparen' ? '→ ' : '−';
-    const farbe = b.art === 'einnahme' ? 'gruen' : b.art === 'sparen' ? 'blau' : '';
-    h += `<button class="buchung" data-action="bearbeiten" data-id="${b.id}">
-      <span class="punkt" style="background:${esc(k.farbe)}"></span>
-      <span class="mitte"><div>${esc(k.name)}${b.vorlageId ? ' 📌' : ''}${b.datum > heute() ? ' <span class="klein blau">⏳ geplant</span>' : ''}</div>${b.notiz ? `<div class="notiz">${esc(b.notiz)}</div>` : ''}</span>
-      <span class="betrag ${farbe}">${vorzeichen}${euro(b.betrag)}</span>
-    </button>`;
+    if (!tage.length || tage[tage.length - 1].datum !== b.datum) tage.push({ datum: b.datum, liste: [] });
+    tage[tage.length - 1].liste.push(b);
+  }
+  h += '<div>';
+  for (const t of tage) {
+    const summe = t.liste.reduce((s, b) => s + (b.art === 'einnahme' ? b.betrag : -b.betrag), 0);
+    const tagName = suche && t.datum.slice(0, 4) !== heute().slice(0, 4) ? datumLang(t.datum) : tagRelativ(t.datum);
+    h += `<div class="tag"><span>${tagName}</span><span>${summe > 0 ? '+' : summe < 0 ? '−' : ''}${euro(Math.abs(summe))}</span></div>`;
+    for (const b of t.liste) h += htmlBuchungZeile(b);
+  }
+  return h + '</div>';
+}
+function htmlBuchungZeile(b) {
+  const k = kat(b.kategorieId) || { name: 'Gelöschte Kategorie', farbe: '#666666' };
+  const entnahme = b.art === 'sparen' && b.betrag < 0;
+  const vorzeichen = b.art === 'einnahme' ? '+' : entnahme ? '← ' : b.art === 'sparen' ? '→ ' : '−';
+  const farbe = b.art === 'einnahme' || entnahme ? 'gruen' : b.art === 'sparen' ? 'blau' : '';
+  const w = b.wunschId ? daten.wuensche.find((x) => x.id === b.wunschId) : null;
+  const buchstabe = esc((k.name.match(/[A-Za-zÄÖÜäöü0-9]/) || ['?'])[0].toUpperCase());
+  return `<div class="buchung-wrap"><div class="loesch-hg">${icon('muell')} Löschen</div>
+    <button class="buchung" data-action="bearbeiten" data-id="${b.id}">
+      <span class="kat-symbol" style="background:${esc(k.farbe)}26;color:${esc(k.farbe)}">${w ? esc(wunschEmoji(w)) : buchstabe}</span>
+      <span class="mitte"><div>${esc(k.name)}${b.vorlageId ? ` <span class="grau">${icon('wiederholen')}</span>` : ''}${b.datum > heute() ? ' <span class="badge">geplant</span>' : ''}</div>
+        ${b.notiz ? `<div class="notiz">${esc(b.notiz)}</div>` : ''}</span>
+      <span class="betrag ${farbe}">${vorzeichen}${euro(Math.abs(b.betrag))}</span>
+    </button></div>`;
+}
+
+/* ---------------------------------------------------------------------
+   5b. Auswertung: Analyse · Ausblick · Abos
+   --------------------------------------------------------------------- */
+
+function htmlAuswertung() {
+  const tabs = [['analyse', 'Analyse'], ['ausblick', 'Ausblick'], ['abos', 'Abos']];
+  return `<div class="segment">${tabs.map(([k, t]) =>
+    `<button data-action="auswertung-tab" data-tab="${k}" class="${k === auswertungTab ? 'an' : ''}">${t}</button>`).join('')}</div>`
+    + (auswertungTab === 'analyse' ? htmlAnalyse() : auswertungTab === 'ausblick' ? htmlAusblick() : htmlAbos());
+}
+
+let analyseMonate = 3;
+let wasWaereKat = null, wasWaereBetrag = 0;
+
+function htmlAnalyse() {
+  const a = analyse(analyseMonate);
+  let h = `<div class="segment">${[3, 6, 12].map((n) =>
+    `<button data-action="analyse-monate" data-n="${n}" class="${n === analyseMonate ? 'an' : ''}">${n} Monate</button>`).join('')}</div>`;
+  if (a.n < 2) {
+    h += `<div class="hinweis warn">${icon('warn')} Noch zu wenig Daten: Für eine gute Analyse braucht es 2–3 abgeschlossene Monate
+      mit Buchungen (bisher ${a.n}). Was schon geht, siehst du hier.</div>`;
+  }
+  if (a.n === 0) return h;
+
+  // Überblick
+  const sq = a.schnittEin > 0 ? (a.schnittEin - a.schnittAus) / a.schnittEin : null;
+  const fixQuote = a.schnittEin > 0 ? a.schnittFix / a.schnittEin : null;
+  h += `<section class="karte"><h2>${icon('auswertung')} Ø pro Monat (${a.n} Monat${a.n > 1 ? 'e' : ''})</h2>
+    <div class="raster" style="gap:10px">
+      <div><div class="label">Einnahmen</div><div class="wert gruen">${euroHtml(Math.round(a.schnittEin))}</div></div>
+      <div><div class="label">Ausgaben</div><div class="wert">${euroHtml(Math.round(a.schnittAus))}</div></div>
+      <div><div class="label">Gespart</div><div class="wert blau">${euroHtml(Math.round(a.schnittSpar))}</div></div>
+      <div><div class="label">Sparquote</div><div class="wert ${sq === null ? '' : sq >= 0.1 ? 'gruen' : sq >= 0 ? 'gelb' : 'rot'}">${sq === null ? '–' : prozent(sq)}</div></div>
+    </div>
+    ${fixQuote !== null ? `<div class="klein" style="margin-top:12px"><b>${prozent(fixQuote)}</b> deines Einkommens sind fest verplant (Fixkosten).</div>` : ''}
+  </section>`;
+
+  // Wohin geht das Geld?
+  if (a.kats.length) {
+    const max = a.kats[0].schnitt;
+    h += `<section class="karte"><h2>${icon('kategorie')} Wohin geht das Geld?</h2>` + a.kats.map((k) => {
+      let trend = '';
+      if (a.n >= 2 && k.davor > 0) {
+        const t = (k.letzter - k.davor) / k.davor;
+        if (Math.abs(t) >= 0.05) trend = `<span class="${t > 0 ? 'rot' : 'gruen'}">${icon(t > 0 ? 'hoch' : 'runter')} ${prozent(Math.abs(t))}</span>`;
+      }
+      return `<div class="katzeile">
+        <div class="zeile"><span><span class="punkt" style="background:${esc(k.kat.farbe)}"></span>${esc(k.kat.name)}${k.kat.fix ? ' <span class="badge">fix</span>' : ''}</span>
+          <span>${euro(Math.round(k.schnitt))} <span class="klein grau">Ø · ${prozent(k.anteil)}</span></span></div>
+        <div class="leiste" style="height:7px"><span style="width:${(k.schnitt / max) * 100}%;background:${esc(k.kat.farbe)}"></span></div>
+        ${trend ? `<div class="klein grau">Letzter Monat ggü. davor: ${trend}</div>` : ''}
+      </div>`;
+    }).join('') + '</section>';
+  }
+
+  // Auffälligkeiten (Warnungen, Hinweise, Lob)
+  const punkte = [];
+  const tag = Number(heute().slice(8));
+  const vormonatName = MONATE[Number(a.monate[0].slice(5)) - 1];
+  for (const k of a.kats) {
+    if (k.kat.fix || a.n < 2) continue;
+    if (k.aktuell > k.schnitt * 1.3 && k.aktuell - k.schnitt > 2000) {
+      punkte.push(['warn', `<b>${esc(k.kat.name)}</b> diesen Monat schon ${euro(k.aktuell)} – ${prozent(k.aktuell / k.schnitt - 1)} über deinem Schnitt (${euro(Math.round(k.schnitt))}).`]);
+    } else if (tag >= 25 && k.aktuell < k.schnitt * 0.85 && k.schnitt - k.aktuell > 2000) {
+      punkte.push(['gut', `Diesen Monat ${euro(Math.round(k.schnitt - k.aktuell))} weniger für <b>${esc(k.kat.name)}</b> als im Schnitt 👍`]);
+    } else if (k.letzter < k.schnitt * 0.85 && k.schnitt - k.letzter > 2000) {
+      punkte.push(['gut', `Im ${vormonatName} ${euro(Math.round(k.schnitt - k.letzter))} weniger für <b>${esc(k.kat.name)}</b> als im Schnitt 👍`]);
+    }
+  }
+  let kleinAnz = 0, kleinSumme = 0;
+  for (const m of a.monate) { const k = kleineAusgaben(m); kleinAnz += k.anzahl; kleinSumme += k.summe; }
+  if (kleinAnz / a.n >= 5) {
+    punkte.push(['info', `<b>Kleinvieh:</b> Ø ${Math.round(kleinAnz / a.n)}× bis ${euro(daten.einst.kleinGrenze)} = ${euro(Math.round(kleinSumme / a.n))} pro Monat (${euroRund(kleinSumme / a.n * 12)} im Jahr).`]);
+  }
+  if (fixQuote !== null && fixQuote > 0.6) punkte.push(['warn', `Über 60 % deines Einkommens sind fest verplant – da bleibt wenig Spielraum. Ein Blick auf die Abos lohnt sich.`]);
+  const ab = abos();
+  if (ab.length) {
+    const jahr = ab.reduce((s, x) => s + x.jahr, 0);
+    punkte.push(['info', `<b>Regelmäßige Kosten:</b> ${euroRund(jahr)} im Jahr. Größter Posten: ${esc(ab[0].v.name)} (${euroRund(ab[0].jahr)}/Jahr).`]);
+    const alt = ab.filter((x) => aboAlt(x.v) && !x.v.kreditId);
+    if (alt.length) punkte.push(['warn', `${alt.length} regelmäßige Zahlung${alt.length > 1 ? 'en' : ''} seit über einem Jahr nicht geprüft: ${alt.slice(0, 3).map((x) => esc(x.v.name)).join(', ')} → Tab „Abos“.`]);
+  }
+  if (sq !== null && a.n >= 2) {
+    punkte.push(sq >= 0.1 ? ['gut', `Deine Sparquote liegt bei ${prozent(sq)} – der übliche Richtwert ist 10–20 %. Stark!`]
+      : ['info', `Deine Sparquote liegt bei ${prozent(sq)}. Üblicher Richtwert: 10–20 %.`]);
+  }
+  if (punkte.length) {
+    const sym = { warn: `<span class="gelb">${icon('warn')}</span>`, gut: `<span class="gruen">${icon('haken')}</span>`, info: `<span class="akzent">${icon('idee')}</span>` };
+    h += `<section class="karte"><h2>${icon('idee')} Auffälligkeiten</h2>
+      ${punkte.map(([art, t]) => `<div style="display:flex;gap:10px;margin:10px 0">${sym[art]}<div class="klein">${t}</div></div>`).join('')}</section>`;
+  }
+
+  // Vorschläge mit Wirkung aufs Ziel
+  const ziel = hauptZiel();
+  const kandidaten = a.kats.filter((k) => !k.kat.fix && k.schnitt >= 3000).slice(0, 3);
+  if (kandidaten.length) {
+    h += `<section class="karte"><h2>${icon('blitz')} Spar-Vorschläge</h2>` + kandidaten.map((k) => {
+      const kuerz = Math.max(500, Math.round((k.schnitt * 0.15) / 500) * 500);
+      let wirkung = null;
+      if (ziel) {
+        const alt = zielPrognose(ziel), neu = zielPrognose(ziel, kuerz);
+        if (alt.monat && neu.monat) {
+          const diff = monatsAbstand(neu.monat, alt.monat);
+          if (diff > 0) wirkung = `erreichst du „${esc(ziel.name)}“ <b>${diff} Monat${diff > 1 ? 'e' : ''} früher</b> (${monatKurz(neu.monat)} statt ${monatKurz(alt.monat)})`;
+        } else if (neu.monat) wirkung = `erreichst du „${esc(ziel.name)}“ im <b>${monatName(neu.monat)}</b>`;
+      }
+      wirkung ??= `hast du <b>${euroRund(kuerz * 12)}</b> im Jahr mehr`;
+      const budget = aufrunden(k.schnitt - kuerz, 500);
+      return `<div class="katzeile">
+        <div class="klein">Wenn du <b>${esc(k.kat.name)}</b> um <b>${euro(kuerz)}</b> im Monat senkst (bisher Ø ${euro(Math.round(k.schnitt))}), ${wirkung}.</div>
+        ${k.kat.budget === budget ? '<div class="klein gruen" style="margin-top:6px">✓ Als Budget übernommen</div>'
+          : `<button class="knopf klein" style="margin-top:8px" data-action="budget-uebernehmen" data-id="${k.id}" data-betrag="${budget}">Als Budget übernehmen (${euro(budget)}/Monat)</button>`}
+      </div>`;
+    }).join('') + (ziel ? '<div class="klein grau">Gilt, wenn du das Ersparte auch wirklich zurücklegst.</div>' : '') + '</section>';
+  }
+
+  // Was wäre, wenn …
+  const varKats = a.kats.filter((k) => !k.kat.fix && k.schnitt > 0);
+  if (ziel && varKats.length) {
+    const wk = varKats.find((k) => k.id === wasWaereKat) || varKats[0];
+    wasWaereKat = wk.id;
+    const max = aufrunden(wk.schnitt, 500);
+    wasWaereBetrag = Math.min(wasWaereBetrag, max);
+    h += `<section class="karte"><h2>${icon('ziel')} Was wäre, wenn …</h2>
+      <label class="feld"><span>… ich bei dieser Kategorie weniger ausgebe</span>
+        <select id="ww-kat">${varKats.map((k) => `<option value="${k.id}" ${k.id === wk.id ? 'selected' : ''}>${esc(k.kat.name)} (Ø ${euro(Math.round(k.schnitt))})</option>`).join('')}</select></label>
+      <div class="zeile"><span>Weniger pro Monat</span><b id="ww-betrag">${euro(wasWaereBetrag)}</b></div>
+      <input type="range" id="ww-regler" min="0" max="${max}" step="500" value="${wasWaereBetrag}">
+      <div id="ww-ergebnis" class="klein" style="margin-top:8px">${wasWaereText(ziel, wasWaereBetrag)}</div>
+    </section>`;
+  }
+
+  // Sparquote im Verlauf (älteste links)
+  const verlauf = a.monate.map((m, i) => ({ m, sq: a.zahlen[i].sparquote })).reverse();
+  if (verlauf.length >= 2) {
+    const skala = Math.max(0.3, ...verlauf.map((x) => Math.abs(x.sq || 0)));
+    h += `<section class="karte"><h2>${icon('auswertung')} Sparquote im Verlauf</h2>
+      <div class="balken-reihe">
+        <div class="richtwert" style="bottom:${(0.1 / skala) * 100}%;height:${(0.1 / skala) * 100}%"></div>
+        ${verlauf.map((x) => {
+          const q = x.sq || 0;
+          return `<div class="b"><span style="height:${(Math.abs(q) / skala) * 100}%;background:var(--${q >= 0.1 ? 'gruen' : q >= 0 ? 'gelb' : 'rot'})" title="${prozent(q)}"></span></div>`;
+        }).join('')}
+      </div>
+      <div class="balken-unter">${verlauf.map((x) => `<span>${MONATE[Number(x.m.slice(5)) - 1].slice(0, 3)}<br>${x.sq === null ? '–' : prozent(x.sq)}</span>`).join('')}</div>
+      <div class="klein grau" style="margin-top:8px">Grün hinterlegt: Richtwert 10–20 %. Kein Muss – nur zur Orientierung.</div>
+    </section>`;
   }
   return h;
+}
+
+function wasWaereText(ziel, betrag) {
+  const alt = zielPrognose(ziel), neu = zielPrognose(ziel, betrag);
+  const name = `„${esc(ziel.name)}“`;
+  if (alt.erreicht) return `${name} ist schon erreicht 🎉`;
+  if (!neu.monat) return `Bei ${name} ist so noch kein Datum absehbar (über 10 Jahre). Schieb den Regler weiter nach rechts.`;
+  const jahr = betrag ? ` · ${euroRund(betrag * 12)} mehr im Jahr` : '';
+  if (!alt.monat) return `${name} wäre im <b>${monatName(neu.monat)}</b> erreicht${jahr}.`;
+  const diff = monatsAbstand(neu.monat, alt.monat);
+  return `${name} erreicht im <b>${monatName(neu.monat)}</b>${diff > 0 ? ` statt ${monatName(alt.monat)} – <b class="gruen">${diff} Monat${diff > 1 ? 'e' : ''} früher</b>` : ''}${jahr}.`;
+}
+
+function htmlAbos() {
+  const liste = abos();
+  if (!liste.length) {
+    return `<div class="leer">Noch keine regelmäßigen Ausgaben.<br>Leg sie unter Einstellungen → Regelmäßige Buchungen an.</div>`;
+  }
+  const monat = liste.reduce((s, x) => s + x.monat, 0);
+  const jahr = liste.reduce((s, x) => s + x.jahr, 0);
+  const ein = analyse(3).schnittEin;
+  let h = `<section class="karte hero">
+    <div class="label">Regelmäßige Kosten pro Monat</div>
+    <div class="zahl">${euroHtml(Math.round(monat))}</div>
+    <div class="klein">= <b>${euroRund(jahr)}</b> im Jahr${ein > 0 ? ` · ${prozent(monat / ein)} deines Einkommens` : ''}</div>
+  </section><section class="karte"><h2>${icon('wiederholen')} Alle Abos & Verträge</h2>`;
+  h += liste.map(({ v, monat: m, jahr: j }) => `<div class="katedit" style="margin-bottom:12px">
+      <span class="punkt" style="background:${esc(kat(v.kategorieId)?.farbe || '#666')}"></span>
+      <span style="flex:1;min-width:0">${esc(v.name)}${v.kreditId ? ' <span class="badge">Kredit</span>' : ''}<br>
+        <span class="klein grau">${euro(v.betrag)} ${intervallName(v.intervall || 1).toLowerCase()}${(v.intervall || 1) > 1 ? ` · ${euro(Math.round(m))}/Monat` : ''}</span>
+        ${aboAlt(v) && !v.kreditId ? '<br><span class="klein gelb">Seit über einem Jahr nicht geprüft – noch nötig? Günstiger zu haben?</span>' : ''}</span>
+      <span style="text-align:right"><b>${euroRund(j)}</b><br><span class="klein grau">pro Jahr</span></span>
+      ${aboAlt(v) && !v.kreditId ? `<button class="x" data-action="abo-geprueft" data-id="${v.id}" aria-label="Geprüft">${icon('haken')}</button>` : ''}
+    </div>`).join('');
+  return h + `<div class="klein grau">Ändern oder löschen: Einstellungen → Regelmäßige Buchungen.</div></section>`;
+}
+
+/* ---------------------------------------------------------------------
+   5c. Wünsche & Träume
+   --------------------------------------------------------------------- */
+
+function htmlWuensche() {
+  const offen = offeneWuensche();
+  const plan = wunschPlan();
+  const erfuellt = daten.wuensche.filter((w) => w.status === 'erfuellt').sort((a, b) => (b.erfuelltAm || '').localeCompare(a.erfuelltAm || ''));
+  let h = `<div class="knopfreihe" style="margin:0">
+    <button class="knopf haupt" data-action="wunsch-neu" data-typ="wunsch">${icon('plus')} Wunsch</button>
+    <button class="knopf" data-action="wunsch-neu" data-typ="projekt">${icon('plus')} Traum-Projekt</button></div>`;
+  if (!offen.length) {
+    h += `<div class="leer">Noch keine Wünsche.<br><br><b>Wunsch</b> = eine Sache mit Preis (z. B. Winterreifen).<br>
+      <b>Traum-Projekt</b> = etwas Großes aus mehreren Teilen (z. B. Japan-Tour: Rad, Flug, Ausrüstung, Reisekasse).<br><br>
+      Die App sagt dir, ob und ab wann der Kauf drin ist.</div>`;
+  } else {
+    const restSumme = offen.reduce((s, w) => s + wunschRest(w), 0);
+    const std = arbeitsstunden(restSumme);
+    h += `<section class="karte">
+      <div class="zeile"><span class="label">${offen.length} offen · es fehlen noch</span><b>${euroRund(restSumme)}</b></div>
+      ${std ? `<div class="klein grau">${icon('uhr')} entspricht ${std}</div>` : ''}
+      <div class="klein" style="margin-top:8px">${icon('kalender')} <b>Plan:</b> ${offen.map((w) => {
+        const r = plan[w.id];
+        return `${esc(wunschEmoji(w))} ${esc(w.name)} <span class="${r.ampel}">${r.monat === 0 && !r.pause ? 'jetzt' : r.ab ? monatKurz(r.ab) : 'offen'}</span>`;
+      }).join(' → ')}</div>
+      <div class="klein grau" style="margin-top:4px">Reihenfolge mit ↑↓ ändern. Was weiter oben steht, kommt zuerst dran.</div>
+    </section>`;
+    offen.forEach((w, i) => { h += htmlWunschKarte(w, plan[w.id], i, offen.length); });
+  }
+  if (erfuellt.length) {
+    h += `<details class="karte"><summary class="label tippbar">${icon('haken')} Erfüllt (${erfuellt.length})</summary>
+      ${erfuellt.map((w) => `<div class="katedit" style="margin-top:10px">
+        <span style="font-size:1.3rem">${esc(wunschEmoji(w))}</span>
+        <span style="flex:1">${esc(w.name)}<br><span class="klein grau">${euro(wunschGesamt(w))}${w.erfuelltAm ? ` · ${new Date(w.erfuelltAm).toLocaleDateString('de-DE')}` : ''}</span></span>
+        <button class="x" data-action="wunsch-loeschen" data-id="${w.id}" aria-label="Löschen">${icon('kreuz')}</button></div>`).join('')}
+    </details>`;
+  }
+  return h;
+}
+
+function htmlWunschKarte(w, r, i, anzahl) {
+  const gesamt = wunschGesamt(w);
+  const anteil = wunschAnteil(w);
+  const std = arbeitsstunden(r.rest);
+  return `<section class="karte wunsch" data-action="wunsch-details" data-id="${w.id}">
+    <div class="wunsch-kopf">
+      <div class="wunsch-emoji">${esc(wunschEmoji(w))}</div>
+      <div style="flex:1;min-width:0">
+        <div class="zeile"><b>${esc(w.name)}</b><b style="font-variant-numeric:tabular-nums">${euroRund(gesamt)}</b></div>
+        <div class="klein grau">${w.typ === 'projekt' ? `Traum-Projekt · ${(w.teile || []).length} Teile · ` : ''}${prioName(w.prio)}${w.termin ? ` · bis ${monatKurz(w.termin)}` : ''}</div>
+      </div>
+    </div>
+    ${anteil > 0 ? `<div class="leiste" style="height:7px;margin-top:10px"><span style="width:${anteil * 100}%;background:var(--akzent)"></span></div>
+      <div class="klein grau">${prozent(anteil)} · noch ${euro(r.rest)}</div>` : ''}
+    <div class="ampel-box ${r.ampel}"><div class="klein"><span class="ampel ${r.ampel}"></span><b>${r.titel}</b></div>
+      <div class="klein" style="margin-top:2px">${r.text}</div></div>
+    ${std ? `<div class="klein grau">${icon('uhr')} entspricht ${std}</div>` : ''}
+    <div class="knopfreihe" style="margin-top:10px;align-items:center">
+      <button class="x ${w.istZiel ? 'an' : ''}" data-action="wunsch-ziel" data-id="${w.id}" aria-label="Als Ziel oben zeigen">${icon('wunsch')}</button>
+      <button class="x" data-action="wunsch-hoch" data-id="${w.id}" aria-label="Nach oben" ${i === 0 ? 'disabled style="opacity:.3"' : ''}>${icon('pfeilhoch')}</button>
+      <button class="x" data-action="wunsch-runter" data-id="${w.id}" aria-label="Nach unten" ${i === anzahl - 1 ? 'disabled style="opacity:.3"' : ''}>${icon('pfeilrunter')}</button>
+      <span style="flex:1"></span>
+      ${w.typ === 'projekt' ? '<span class="klein akzent">Details ›</span>'
+        : `<button class="knopf klein haupt" data-action="wunsch-gekauft" data-id="${w.id}">${icon('haken')} Gekauft</button>`}
+    </div>
+  </section>`;
 }
 
 const katOptionenFuer = (art, gewaehlt) => kategorienVon(art)
@@ -849,7 +1690,7 @@ function htmlEinmalig(v) {
   const kredit = v.kreditId ? daten.kredite.find((k) => k.id === v.kreditId) : null;
   const beispiel = kredit ? 'Rate + Sondertilgung' : v.art === 'einnahme' ? 'Gehalt + Prämie' : 'Nachzahlung';
   return `<div class="einmalig-box">
-    <div class="label" style="margin-bottom:6px">💶 Nur einmalig anderer Betrag</div>
+    <div class="label" style="margin-bottom:6px">Nur einmalig anderer Betrag</div>
     <div class="klein grau" style="margin-bottom:8px">Z. B. ${beispiel}. Gilt nur für den gewählten Monat, danach wieder ${euro(v.betrag)}.
       ${kredit && kredit.typ === 'kredit' ? 'Eine Sondertilgung senkt auch die Restschuld.' : ''}</div>
     ${htmlMonatWahl('v-ein-monat', naechsteFaelligkeit(v) || heute().slice(0, 7))}
@@ -857,7 +1698,7 @@ function htmlEinmalig(v) {
     <button class="knopf" data-action="einmalig-speichern">Einmalig übernehmen</button>
     ${kommendeAusnahmen(v).map(([m, b]) => `<div class="zeile klein" style="margin-top:8px">
       <span>✱ ${monatName(m)}: <b>${euro(b)}</b></span>
-      <button class="x" data-action="einmalig-loeschen" data-monat="${m}" aria-label="Einmaligen Betrag entfernen">✕</button></div>`).join('')}
+      <button class="x" data-action="einmalig-loeschen" data-monat="${m}" aria-label="Einmaligen Betrag entfernen">${icon('kreuz')}</button></div>`).join('')}
   </div>`;
 }
 
@@ -871,7 +1712,7 @@ function htmlEinstellungen() {
       <input type="color" value="${esc(k.farbe)}" data-kat-feld="farbe" data-id="${k.id}">
       <input type="text" value="${esc(k.name)}" data-kat-feld="name" data-id="${k.id}">
       ${art === 'ausgabe' ? `<label><input type="checkbox" data-kat-feld="fix" data-id="${k.id}" ${k.fix ? 'checked' : ''}>fix</label>` : ''}
-      <button class="x" data-action="kat-loeschen" data-id="${k.id}" aria-label="Kategorie löschen">✕</button>
+      <button class="x" data-action="kat-loeschen" data-id="${k.id}" aria-label="Kategorie löschen">${icon('kreuz')}</button>
     </div>`).join('');
 
   // Formular für monatliche Buchungen: leer (neu) oder mit Werten (bearbeiten)
@@ -883,16 +1724,36 @@ function htmlEinstellungen() {
   const vorlagenSortiert = [...daten.vorlagen].sort((a, b) => a.tag - b.tag);
 
   return `
-  <section class="karte"><h2>💰 Puffer & Sparziel</h2>
+  <section class="karte"><h2>${icon('schwein')} Puffer & Sparziel</h2>
     <label class="feld"><span>Aktueller Stand Notgroschen-Konto (€)</span>${euroFeld('puffer', e.puffer)}</label>
     <label class="feld"><span>Name des Sparziels</span><input type="text" data-einst="zielName" value="${esc(e.zielName)}"></label>
     <label class="feld"><span>Zielbetrag (€)</span>${euroFeld('zielBetrag', e.zielBetrag)}</label>
     <label class="check"><input type="checkbox" data-einst="zielGleichPuffer" ${e.zielGleichPuffer ? 'checked' : ''}>Fortschritt = Puffer-Stand</label>
     ${e.zielGleichPuffer ? '' : `<label class="feld"><span>Bisher gespart für dieses Ziel (€)</span>${euroFeld('zielStand', e.zielStand)}</label>`}
+    <label class="check"><input type="checkbox" id="ziel-mit-termin" ${e.zielTermin ? 'checked' : ''}>Wunschtermin festlegen (für die Ampel „im Plan“)</label>
+    ${e.zielTermin ? `<div class="feld" data-ziel-termin>${htmlMonatWahl('ziel-termin', e.zielTermin)}</div>` : ''}
+    <label class="check"><input type="checkbox" data-einst="zielAnzeigen" ${e.zielAnzeigen !== false ? 'checked' : ''}>Als Karte ganz oben in der Übersicht zeigen</label>
     <div class="klein grau">Tipp: Ein Notgroschen von 3–6 Monatsausgaben gilt als solide.</div>
   </section>
 
-  <section class="karte"><h2>📌 Regelmäßige Buchungen</h2>
+  <section class="karte"><h2>${icon('farbe')} Darstellung</h2>
+    <div class="label">Akzentfarbe</div>
+    <div class="farbwahl">${Object.entries(AKZENTE).map(([k, f]) =>
+      `<button data-action="akzent-wahl" data-akzent="${k}" class="${k === e.akzent ? 'an' : ''}" style="background:${f}" aria-label="${k}"></button>`).join('')}</div>
+    <label class="check"><input type="checkbox" data-einst="amoled" ${e.amoled ? 'checked' : ''}>AMOLED-Schwarz (echtes Schwarz, spart Akku)</label>
+    <label class="feld"><span>Start-Bildschirm mit deinem Ziel beim Öffnen</span><select data-einst="startScreen">
+      ${[['taeglich', 'Einmal am Tag'], ['immer', 'Bei jedem Öffnen'], ['aus', 'Aus']].map(([k, t]) =>
+        `<option value="${k}" ${k === e.startScreen ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+  </section>
+
+  <section class="karte"><h2>${icon('wunsch')} Wünsche</h2>
+    <label class="feld"><span>Girokonto soll am Monatsende nicht unter … fallen (€)</span>${euroFeld('kontoUntergrenze', e.kontoUntergrenze)}</label>
+    <label class="feld"><span>Dein Netto-Stundenlohn (€) – für „entspricht X Arbeitsstunden“</span>${euroFeld('stundenlohn', e.stundenlohn)}</label>
+    <label class="feld"><span>Gedanken-Pause für Spaß-Käufe ab (€) – 7 Tage, ab dem 5-Fachen 30 Tage</span>${euroFeld('pauseGrenze', e.pauseGrenze)}</label>
+    <div class="klein grau">Netto-Stundenlohn ≈ Netto im Monat ÷ Arbeitsstunden im Monat (z. B. 2.100 € ÷ 165 h ≈ 12,70 €).</div>
+  </section>
+
+  <section class="karte"><h2>${icon('wiederholen')} Regelmäßige Buchungen</h2>
     <div class="klein grau" style="margin-bottom:10px">Für alles, was regelmäßig kommt: Fixkosten, Gehalt, Sparrate –
       auch vierteljährlich oder jährlich (z. B. Versicherungen). In der Übersicht trägst du sie mit einem Tipp ein, sobald sie fällig sind.</div>
     ${vorlagenSortiert.length ? vorlagenSortiert.map((v) => `
@@ -900,8 +1761,8 @@ function htmlEinstellungen() {
         <span class="punkt" style="background:${esc(kat(v.kategorieId)?.farbe || '#666')}"></span>
         <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${vorzeichen[v.art || 'ausgabe']}${euro(v.betrag)} · ${(v.intervall || 1) > 1 ? `${intervallName(v.intervall).toLowerCase()}, nächste ${monatKurz(naechsteFaelligkeit(v) || heute().slice(0, 7))} · ` : ''}${tagText(v.tag)} · ${esc(kat(v.kategorieId)?.name || '?')}${kommendeAusnahmen(v).map(([m, b]) =>
           `<br><span class="gelb">✱ ${monatKurz(m)} einmalig ${vorzeichen[v.art || 'ausgabe']}${euro(b)}</span>`).join('')}</span></span>
-        <button class="x" data-action="vorlage-bearbeiten" data-id="${v.id}" aria-label="Bearbeiten">✎</button>
-        <button class="x" data-action="vorlage-loeschen" data-id="${v.id}" aria-label="Vorlage löschen">✕</button>
+        <button class="x" data-action="vorlage-bearbeiten" data-id="${v.id}" aria-label="Bearbeiten">${icon('stift')}</button>
+        <button class="x" data-action="vorlage-loeschen" data-id="${v.id}" aria-label="Vorlage löschen">${icon('kreuz')}</button>
       </div>`).join('') : '<div class="klein grau">Noch keine Vorlagen.</div>'}
     <div id="v-formular" ${ve ? 'class="bearbeiten-box"' : ''}>
     <div class="unter">${ve ? `✎ Bearbeiten: ${esc(ve.name)}` : 'Neu'}</div>
@@ -926,13 +1787,14 @@ function htmlEinstellungen() {
     </div>
   </section>
 
-  <section class="karte"><h2>🏦 Kredite & Verträge</h2>
+  <section class="karte"><h2>${icon('karte')} Kredite & Verträge</h2>
     ${daten.kredite.length ? daten.kredite.map((k) => {
       const i = kreditInfo(k);
       return `<div style="margin-bottom:14px" id="kredit-${k.id}">
         <div class="katedit">
-          <span style="flex:1"><b>${esc(k.name)}</b><br><span class="klein grau">${euro(k.rate)} am ${k.tag}. · ${laufzeitText(i)}</span></span>
-          <button class="x" data-action="kredit-loeschen" data-id="${k.id}" aria-label="Löschen">✕</button>
+          <span style="flex:1"><b>${esc(k.name)}</b><br><span class="klein grau">${euro(k.rate)} ${tagText(k.tag)} · ${laufzeitText(i)}</span></span>
+          <button class="x" data-action="kredit-bearbeiten" data-id="${k.id}" aria-label="Bearbeiten">${icon('stift')}</button>
+          <button class="x" data-action="kredit-loeschen" data-id="${k.id}" aria-label="Löschen">${icon('kreuz')}</button>
         </div>
         ${k.typ === 'kredit' ? `<label class="feld"><span>Restschuld heute (zum Korrigieren, z. B. laut Kontoauszug)</span>
           <input type="text" inputmode="decimal" data-kredit-feld="restschuld" data-id="${k.id}" value="${centZuText(i.restschuld)}"></label>`
@@ -968,7 +1830,15 @@ function htmlEinstellungen() {
     <button class="knopf" data-action="kredit-neu">Hinzufügen</button>
   </section>
 
-  <section class="karte"><h2>🏷️ Kategorien</h2>
+  <section class="karte"><h2>${icon('ziel')} Budgets pro Monat</h2>
+    <div class="klein grau" style="margin-bottom:10px">Leer lassen = kein Budget. Ab 80 % gibt es in der Übersicht eine Warnung.</div>
+    ${kategorienVon('ausgabe').map((k) => `<div class="katedit">
+      <span class="punkt" style="background:${esc(k.farbe)}"></span><span style="flex:1">${esc(k.name)}</span>
+      <input type="text" inputmode="decimal" data-kat-feld="budget" data-id="${k.id}" style="width:110px;flex:none" placeholder="kein"
+        value="${k.budget ? centZuText(k.budget) : ''}"></div>`).join('')}
+  </section>
+
+  <section class="karte"><h2>${icon('kategorie')} Kategorien</h2>
     ${katGruppe('ausgabe', 'Ausgaben (Häkchen = Fixkosten)')}
     ${katGruppe('einnahme', 'Einnahmen')}
     ${katGruppe('sparen', 'Sparen (Geld aufs Sparkonto)')}
@@ -980,13 +1850,15 @@ function htmlEinstellungen() {
     <button class="knopf" data-action="kat-neu" style="margin-top:8px">Kategorie hinzufügen</button>
   </section>
 
-  <section class="karte"><h2>🔎 Kleine Ausgaben</h2>
+  <section class="karte"><h2>${icon('suche')} Kleine Ausgaben</h2>
     <label class="feld"><span>Als „klein“ zählt alles bis (€)</span>${euroFeld('kleinGrenze', e.kleinGrenze)}</label>
   </section>
 
   ${htmlSync()}
 
-  <section class="karte"><h2>💾 Backup</h2>
+  ${htmlSperreEinst()}
+
+  <section class="karte"><h2>${icon('backup')} Backup</h2>
     <div class="klein grau" style="margin-bottom:10px">Deine Daten liegen nur auf diesem Handy. Mach regelmäßig ein Backup und speichere die Datei z. B. in Google Drive.<br>
     Letztes Backup: <b>${e.letztesBackup ? new Date(e.letztesBackup).toLocaleDateString('de-DE') : 'noch nie'}</b> · ${daten.buchungen.length} Buchungen</div>
     <button class="knopf haupt" data-action="export">Backup herunterladen</button>
@@ -994,28 +1866,51 @@ function htmlEinstellungen() {
       <button class="knopf" data-action="teilen">Backup teilen …</button>
       <button class="knopf" data-action="import">Wiederherstellen</button>
     </div>
+    <div class="knopfreihe"><button class="knopf" data-action="csv">Als CSV exportieren (für Excel)</button></div>
   </section>
 
   <div class="klein grau" style="text-align:center">Meine Finanzen · Version ${APP_VERSION}</div>`;
 }
 
 /* ---------------------------------------------------------------------
-   6. Eingabe-Formular
+   6. Eingabe-Formulare – alle als "Bottom Sheet" (schiebt sich von unten hoch)
    --------------------------------------------------------------------- */
 
-let form = null; // die Buchung, die gerade bearbeitet wird
+let form = null;        // die Buchung, die gerade bearbeitet wird
+let sheetOffen = false;
 const sheet = () => document.getElementById('formular');
+
+function sheetOeffnen(html) {
+  const s = sheet(), hg = document.getElementById('sheet-hg');
+  s.innerHTML = `<div class="griff"></div><div class="sheet-inhalt">${html}</div>`;
+  s.scrollTop = 0;
+  if (!sheetOffen) {
+    sheetOffen = true;
+    s.hidden = false; hg.hidden = false;
+    void s.offsetWidth; // damit die Animation startet
+    s.classList.add('offen'); hg.classList.add('offen');
+    history.pushState({ formular: true }, ''); // damit die Zurück-Taste das Sheet schließt
+  }
+}
+const sheetKopf = (titel) => `<div class="sheet-kopf"><h1>${titel}</h1>
+  <button class="x" data-action="form-schliessen" aria-label="Schließen">${icon('kreuz')}</button></div>`;
+
+function formSchliessen(durchZurueckTaste) {
+  if (!sheetOffen) return;
+  sheetOffen = false;
+  const s = sheet(), hg = document.getElementById('sheet-hg');
+  s.classList.remove('offen'); hg.classList.remove('offen');
+  setTimeout(() => { if (!sheetOffen) { s.hidden = true; hg.hidden = true; s.innerHTML = ''; } }, 330);
+  form = null; wf = null; wunschOffen = null;
+  if (!durchZurueckTaste && history.state?.formular) history.back();
+}
 
 function formOeffnen(buchung) {
   const standardDatum = aktMonat === heute().slice(0, 7) ? heute() : `${aktMonat}-01`;
   form = buchung ? { ...buchung }
     : { art: 'ausgabe', betrag: null, kategorieId: null, datum: standardDatum, notiz: '' };
-
-  sheet().innerHTML = `<div class="sheet-inhalt">
-    <div class="zeile" style="margin-bottom:12px">
-      <h1 style="margin:0;font-size:1.2rem">${form.id ? 'Buchung bearbeiten' : 'Neue Buchung'}</h1>
-      <button class="x" data-action="form-schliessen" aria-label="Schließen">✕</button>
-    </div>
+  const fav = form.id ? [] : favoriten();
+  sheetOeffnen(`${sheetKopf(form.id ? 'Buchung bearbeiten' : 'Neue Buchung')}
     <div class="segment">
       <button data-action="f-art" data-art="ausgabe">Ausgabe</button>
       <button data-action="f-art" data-art="einnahme">Einnahme</button>
@@ -1023,6 +1918,8 @@ function formOeffnen(buchung) {
     </div>
     <input id="f-betrag" class="betrag-eingabe" type="text" inputmode="decimal" placeholder="0,00 €"
       value="${form.betrag != null ? centZuText(form.betrag) : ''}" autocomplete="off">
+    ${fav.length ? `<div class="chips" style="margin-top:-6px">${fav.map((f) => `<button type="button" class="chip schnell" data-action="f-favorit"
+      data-name="${esc(f.name)}" data-kat="${f.kategorieId}" data-betrag="${f.betrag}">${icon('blitz')} ${esc(f.name)} ${euro(f.betrag)}</button>`).join('')}</div>` : ''}
     <div class="label">Kategorie</div>
     <div class="chips" id="f-kats"></div>
     <div class="label">Datum</div>
@@ -1033,14 +1930,10 @@ function formOeffnen(buchung) {
     ${form.id ? '' : `<label class="check"><input type="checkbox" id="f-wiederkehrend">Regelmäßig wiederholen (als Vorlage merken)</label>
       <div id="f-tag-box" hidden style="margin:-6px 0 14px"></div>`}
     <button class="knopf haupt" data-action="form-speichern">Speichern</button>
-    ${form.id ? '<div class="knopfreihe"><button class="knopf gefahr" data-action="form-loeschen">Löschen</button></div>' : ''}
-  </div>`;
+    ${form.id ? '<div class="knopfreihe"><button class="knopf gefahr" data-action="form-loeschen">Löschen</button></div>' : ''}`);
   formArtSetzen(form.art);
   datumWahlZeigen();
-
-  sheet().hidden = false;
-  history.pushState({ formular: true }, ''); // damit die Zurück-Taste das Formular schließt
-  if (!form.id) setTimeout(() => document.getElementById('f-betrag').focus(), 60);
+  if (!form.id) setTimeout(() => document.getElementById('f-betrag')?.focus(), 350);
 }
 
 // --- Datumsauswahl im Formular: Heute · Gestern · Kalender ---
@@ -1093,23 +1986,18 @@ function formArtSetzen(art) {
       <span class="punkt" style="background:${esc(k.farbe)}"></span>${esc(k.name)}</button>`).join('');
 }
 
-function formSchliessen(durchZurueckTaste) {
-  if (sheet().hidden) return;
-  sheet().hidden = true;
-  form = null;
-  if (!durchZurueckTaste && history.state?.formular) history.back();
-}
 
 async function formSpeichern() {
   const betrag = centAusText(document.getElementById('f-betrag').value);
-  if (betrag === null || betrag <= 0) return toast('Bitte einen Betrag eingeben');
+  // Minus nur bei "Sparen" (= Geld aus dem Spartopf/Sparkonto zurückholen)
+  if (betrag === null || betrag === 0 || (betrag < 0 && form.art !== 'sparen')) return toast('Bitte einen Betrag eingeben');
   if (!form.kategorieId) return toast('Bitte eine Kategorie wählen');
   const datum = document.getElementById('f-datum').value || heute();
   const notiz = document.getElementById('f-notiz').value.trim();
 
   const b = { id: form.id || neueId(), datum, betrag, art: form.art,
     kategorieId: form.kategorieId, notiz, vorlageId: form.vorlageId || null,
-    erstellt: form.erstellt || Date.now() };
+    erstellt: form.erstellt || Date.now(), ...(form.wunschId ? { wunschId: form.wunschId } : {}) };
 
   // Häkchen "Regelmäßig" → zusätzlich eine Vorlage anlegen
   const wiederkehrend = document.getElementById('f-wiederkehrend');
@@ -1125,7 +2013,307 @@ async function formSpeichern() {
   formSchliessen();
   aktMonat = datum.slice(0, 7);
   render();
+  vibrieren();
   toast('Gespeichert ✓');
+}
+
+/* ---------------------------------------------------------------------
+   6b. Wunsch / Traum-Projekt: Formular und Details
+   --------------------------------------------------------------------- */
+
+let wf = null;          // Zustand des Wunsch-Formulars
+let wunschOffen = null; // id des Wunsches, dessen Details offen sind
+
+function standardKaufKategorie() {
+  const k = kategorienVon('ausgabe');
+  return (k.find((x) => x.name === 'Freizeit') || k.find((x) => x.name === 'Sonstiges') || k[0])?.id;
+}
+// Kategorie "Spartöpfe" (Art Sparen) suchen oder anlegen
+async function spartopfKategorie() {
+  let k = daten.kategorien.find((x) => x.art === 'sparen' && x.name === 'Spartöpfe');
+  if (!k) {
+    k = { id: neueId(), name: 'Spartöpfe', art: 'sparen', fix: false, farbe: '#8f7cff',
+      reihenfolge: Math.max(0, ...daten.kategorien.map((x) => x.reihenfolge ?? 0)) + 1 };
+    await speichern('kategorien', k);
+  }
+  return k;
+}
+
+function wunschFormOeffnen(w, typ = 'wunsch') {
+  wf = w ? { ...w, teile: (w.teile || []).map((t) => ({ ...t })) }
+    : { typ, prio: 'schoen', teile: typ === 'projekt' ? [{ id: neueId(), name: '', preis: 0 }] : [], istZiel: typ === 'projekt' };
+  sheetOeffnen(`${sheetKopf(wf.id ? 'Bearbeiten' : wf.typ === 'projekt' ? 'Neues Traum-Projekt' : 'Neuer Wunsch')}
+    <div class="segment zwei-teile">${[['wunsch', 'Wunsch'], ['projekt', 'Traum-Projekt']].map(([k, t]) =>
+      `<button data-action="wf-typ" data-typ="${k}" class="${k === wf.typ ? 'an' : ''}">${t}</button>`).join('')}</div>
+    <div style="display:grid;grid-template-columns:72px 1fr;gap:8px;margin-top:14px">
+      <label class="feld"><span>Symbol</span><input type="text" id="wf-emoji" value="${esc(wf.emoji || '')}"
+        placeholder="${wf.typ === 'projekt' ? '✨' : '🎁'}" style="text-align:center;font-size:1.3rem;padding:8px"></label>
+      <label class="feld"><span>Name</span><input type="text" id="wf-name" value="${esc(wf.name || '')}"
+        placeholder="${wf.typ === 'projekt' ? 'z. B. Japan-Tour' : 'z. B. Winterreifen'}"></label>
+    </div>
+    <div id="wf-preis-box" ${wf.typ === 'projekt' ? 'hidden' : ''}>
+      <label class="feld"><span>Preis (€)</span><input type="text" inputmode="decimal" id="wf-preis" value="${wf.preis ? centZuText(wf.preis) : ''}"></label></div>
+    <div id="wf-teile-box" ${wf.typ === 'projekt' ? '' : 'hidden'}>
+      <div class="label">Was brauchst du alles dafür? (z. B. Reiserad, Flug, Ausrüstung, Reisekasse)</div>
+      <div id="wf-teile" style="margin-top:6px">${wfTeileHtml()}</div>
+      <button class="knopf klein" data-action="wf-teil-neu" style="margin:2px 0 14px">${icon('plus')} Teil hinzufügen</button>
+    </div>
+    <div class="label">Wie wichtig?</div>
+    <div class="chips" id="wf-prio">${PRIOS.map(([k, t]) =>
+      `<button type="button" class="chip ${k === wf.prio ? 'an' : ''}" data-action="wf-prio" data-prio="${k}">${t}</button>`).join('')}</div>
+    <label class="check"><input type="checkbox" id="wf-mit-termin" ${wf.termin ? 'checked' : ''}>Wunschtermin (bis wann?)</label>
+    <div id="wf-termin-box" ${wf.termin ? '' : 'hidden'} style="margin:-8px 0 12px">${htmlMonatWahl('wf-termin', wf.termin || monatVerschieben(heute().slice(0, 7), 6))}</div>
+    <label class="feld"><span>Schon dafür zurückgelegt (€, optional)</span><input type="text" inputmode="decimal" id="wf-start" value="${wf.startGespart ? centZuText(wf.startGespart) : ''}"></label>
+    <label class="feld"><span>Kategorie, wenn du es kaufst</span><select id="wf-kat">${katOptionenFuer('ausgabe', wf.kategorieId || standardKaufKategorie())}</select></label>
+    <label class="feld"><span>Link (optional)</span><input type="text" inputmode="url" id="wf-link" value="${esc(wf.link || '')}" placeholder="https://…" autocapitalize="off"></label>
+    <label class="feld"><span>Notiz (optional)</span><input type="text" id="wf-notiz" value="${esc(wf.notiz || '')}"></label>
+    <label class="check"><input type="checkbox" id="wf-ziel" ${wf.istZiel ? 'checked' : ''}>Als Ziel ganz oben in der Übersicht zeigen ⭐</label>
+    <button class="knopf haupt" data-action="wf-speichern">Speichern</button>`);
+  if (!wf.id) setTimeout(() => document.getElementById('wf-name')?.focus(), 350);
+}
+function wfTeileHtml() {
+  return wf.teile.map((t) => `<div class="katedit wf-teil" data-tid="${t.id}">
+    <input type="text" class="wf-teil-name" value="${esc(t.name)}" placeholder="Teil">
+    <input type="text" inputmode="decimal" class="wf-teil-preis" value="${t.preis ? centZuText(t.preis) : ''}" placeholder="€" style="width:100px;flex:none">
+    ${t.gekauft ? `<span class="gruen" title="gekauft">${icon('haken')}</span>` : ''}
+    <button class="x" data-action="wf-teil-weg" data-tid="${t.id}" aria-label="Teil entfernen">${icon('kreuz')}</button></div>`).join('');
+}
+function wfTeileLesen() {
+  document.querySelectorAll('.wf-teil').forEach((row) => {
+    const t = wf.teile.find((x) => x.id === row.dataset.tid);
+    if (!t) return;
+    t.name = row.querySelector('.wf-teil-name').value.trim();
+    t.preis = Math.max(0, centAusText(row.querySelector('.wf-teil-preis').value) || 0);
+  });
+}
+async function wunschFormSpeichern() {
+  wfTeileLesen();
+  const wert = (id) => document.getElementById(id).value.trim();
+  const name = wert('wf-name');
+  if (!name) return toast('Bitte einen Namen eingeben');
+  const link = wert('wf-link');
+  const w = {
+    id: wf.id || neueId(), typ: wf.typ, name, emoji: wert('wf-emoji'), prio: wf.prio,
+    termin: document.getElementById('wf-mit-termin').checked ? monatLesen('wf-termin') : null,
+    startGespart: Math.max(0, centAusText(wert('wf-start')) || 0), kategorieId: wert('wf-kat'),
+    link: link && !/^https?:\/\//i.test(link) ? `https://${link}` : link, notiz: wert('wf-notiz'),
+    istZiel: document.getElementById('wf-ziel').checked,
+    angelegt: wf.angelegt || Date.now(), status: wf.status || 'offen',
+    reihenfolge: wf.reihenfolge ?? Math.max(0, ...daten.wuensche.map((x) => (x.reihenfolge ?? 0) + 1)),
+    preis: null, teile: [],
+  };
+  if (w.typ === 'wunsch') {
+    w.preis = centAusText(wert('wf-preis'));
+    if (!w.preis || w.preis <= 0) return toast('Bitte einen Preis eingeben');
+  } else {
+    w.teile = wf.teile.filter((t) => t.name || t.preis).map((t) => ({ ...t, name: t.name || 'Teil' }));
+    if (!w.teile.some((t) => t.preis > 0)) return toast('Bitte mindestens ein Teil mit Preis eintragen');
+  }
+  await speichern('wuensche', w);
+  vibrieren();
+  wunschDetailsOeffnen(w.id);
+  render();
+  toast('Gespeichert ✓');
+}
+
+// Verlauf der Einzahlungen + Vorschläge, die das Ziel schneller machen
+function htmlZielExtras(z) {
+  let h = '';
+  const jetzt = heute().slice(0, 7);
+  const monate = [5, 4, 3, 2, 1, 0].map((i) => monatVerschieben(jetzt, -i));
+  const werte = monate.map((m) => sparSumme(m, z.id));
+  if (werte.some((x) => x !== 0)) {
+    const max = Math.max(1, ...werte.map(Math.abs));
+    h += `<section class="karte" style="margin-top:12px"><h2>${icon('auswertung')} Einzahlungen</h2>
+      <div class="balken-reihe" style="height:80px">${werte.map((x) => `<div class="b"><span style="height:${(Math.abs(x) / max) * 100}%;background:var(--${x < 0 ? 'rot' : 'akzent'})"></span></div>`).join('')}</div>
+      <div class="balken-unter">${monate.map((m, i) => `<span>${MONATE[Number(m.slice(5)) - 1].slice(0, 3)}<br>${werte[i] ? euroRund(werte[i]) : '–'}</span>`).join('')}</div>
+      ${z.tempo ? `<div class="klein grau" style="margin-top:8px">Dein Tempo: ca. ${euro(z.tempo)} pro Monat</div>` : ''}</section>`;
+  }
+  const pr = zielPrognose(z);
+  if (!pr.erreicht && !pr.ohneBetrag) {
+    const a = analyse(3);
+    const vorschlaege = a.kats.filter((k) => !k.kat.fix && k.schnitt >= 3000).slice(0, 2).map((k) => {
+      const kuerz = Math.max(500, Math.round((k.schnitt * 0.15) / 500) * 500);
+      const neu = zielPrognose(z, kuerz);
+      if (!neu.monat) return '';
+      const diff = pr.monat ? monatsAbstand(neu.monat, pr.monat) : 0;
+      return `<div class="klein" style="margin:8px 0">${icon('blitz')} ${euro(kuerz)}/Monat weniger für <b>${esc(k.kat.name)}</b> → erreicht im <b>${monatName(neu.monat)}</b>${diff > 0 ? ` <span class="gruen">(${diff} Monat${diff > 1 ? 'e' : ''} früher)</span>` : ''}</div>`;
+    }).join('');
+    if (vorschlaege) h += `<section class="karte" style="margin-top:12px"><h2>${icon('idee')} So geht's schneller</h2>${vorschlaege}</section>`;
+  }
+  return h;
+}
+
+function wunschDetailsOeffnen(id) {
+  const w = daten.wuensche.find((x) => x.id === id);
+  if (!w) return;
+  wunschOffen = id;
+  const offen = w.status !== 'erfuellt';
+  const r = offen ? wunschPlan()[id] : null;
+  const gesamt = wunschGesamt(w), gespart = wunschGespart(w), gekauft = wunschGekauft(w);
+  const rate = wunschSparrate(w);
+  const std = arbeitsstunden(gesamt);
+  const z = { id, name: w.name, betrag: gesamt, stand: gekauft + Math.max(0, gespart), tempo: zielTempo(id), termin: w.termin };
+  const jetzt = heute().slice(0, 7);
+  let h = `${sheetKopf(`${esc(wunschEmoji(w))} ${esc(w.name)}`)}
+    <div style="display:flex;gap:16px;align-items:center">
+      ${ringSvg(wunschAnteil(w), 100)}
+      <div style="min-width:0">
+        <div class="zahl mittel" style="margin:0">${euroHtml(gesamt)}</div>
+        <div class="klein grau">${w.typ === 'projekt' ? 'Traum-Projekt · ' : ''}${prioName(w.prio)}${w.termin ? ` · bis ${monatName(w.termin)}` : ''}</div>
+        <div class="klein">Im Spartopf <b class="blau">${euro(gespart)}</b>${gekauft ? ` · bezahlt ${euro(gekauft)}` : ''}</div>
+        ${std ? `<div class="klein grau">${icon('uhr')} ${std}</div>` : ''}
+      </div>
+    </div>`;
+  if (r) {
+    h += `<div class="ampel-box ${r.ampel}"><div><span class="ampel ${r.ampel}"></span><b>${r.titel}</b></div>
+      <div class="klein" style="margin-top:2px">${r.text}</div>${r.terminHinweis ? `<div class="klein" style="margin-top:6px">${r.terminHinweis}</div>` : ''}</div>`;
+    // Spartopf
+    h += `<section class="karte"><h2>${icon('schwein')} Spartopf</h2>
+      <input type="text" inputmode="decimal" id="wd-betrag" placeholder="Betrag (€)">
+      <div class="knopfreihe"><button class="knopf haupt" data-action="spartopf-ein">Einzahlen</button>
+        <button class="knopf" data-action="spartopf-aus">Entnehmen</button></div>
+      <div class="klein grau" style="margin-top:8px">Wird als Spar-Buchung eingetragen – leg das Geld z. B. aufs Sparkonto.</div>`;
+    if (r.rest > 0) {
+      h += rate
+        ? `<div class="trenner"></div><div class="zeile"><span>Monatliche Sparrate</span><b>${euro(rate)}</b></div>
+          <div class="klein grau">→ voraussichtlich im ${monatName(monatVerschieben(jetzt, Math.ceil(r.rest / rate)))} voll</div>
+          <button class="knopf klein gefahr" data-action="sparrate-weg" style="margin-top:8px">Sparrate beenden</button>`
+        : `<div class="trenner"></div><div class="klein"><b>Ansparen statt sofort:</b> Leg ${euro(r.rateVorschlag)} im Monat zurück → im <b>${monatName(r.rateZiel)}</b> erreicht.</div>
+          <div style="display:flex;gap:8px;margin-top:8px"><input type="text" inputmode="decimal" id="wd-rate" value="${centZuText(r.rateVorschlag)}" style="width:110px;flex:none">
+            <button class="knopf klein haupt" style="flex:1" data-action="sparrate-neu">Als monatliche Sparrate anlegen</button></div>`;
+    }
+    h += '</section>';
+  }
+  if (w.typ === 'projekt') {
+    h += `<section class="karte" style="margin-top:12px"><h2>${icon('liste')} Teile</h2>${(w.teile || []).map((t) => `
+      <div class="teil ${t.gekauft ? 'erledigt' : ''}"><span class="teil-name" style="flex:1">${esc(t.name)}</span><span class="klein">${euro(t.preis)}</span>
+        ${t.gekauft ? `<span class="gruen klein">${icon('haken')}</span>`
+          : offen ? `<button class="knopf klein" data-action="teil-gekauft" data-tid="${t.id}">Gekauft</button>` : ''}</div>`).join('')}</section>`;
+  }
+  if (r) h += htmlZielExtras(z);
+  if (w.link) h += `<div class="klein" style="margin-top:12px">${icon('pin')} <a href="${esc(w.link)}" target="_blank" rel="noopener">${esc(w.link.replace(/^https?:\/\//, '').slice(0, 50))}</a></div>`;
+  if (w.notiz) h += `<div class="klein grau" style="margin-top:8px">${esc(w.notiz)}</div>`;
+  h += `<div style="margin-top:16px">
+    ${offen ? `<button class="knopf haupt" data-action="wunsch-gekauft" data-id="${id}">${icon('haken')} ${w.typ === 'projekt' ? 'Traum erfüllt 🎉' : 'Gekauft'}</button>` : ''}
+    <div class="knopfreihe">
+      ${offen ? `<button class="knopf" data-action="wunsch-ziel" data-id="${id}">${w.istZiel ? '⭐ Ziel – entfernen' : '☆ Als Ziel oben zeigen'}</button>` : ''}
+      <button class="knopf" data-action="wunsch-bearbeiten" data-id="${id}">${icon('stift')} Bearbeiten</button>
+    </div>
+    <div class="knopfreihe"><button class="knopf gefahr" data-action="wunsch-loeschen" data-id="${id}">Löschen</button></div>
+  </div>`;
+  sheetOeffnen(h);
+}
+
+// Kauf eintragen: Ausgabe buchen + Spartopf (so weit vorhanden) dafür leeren
+async function kaufBuchen(w, preis, notiz) {
+  const jetzt = Date.now();
+  const topf = wunschGespart(w);
+  const katId = w.kategorieId && kat(w.kategorieId) ? w.kategorieId : standardKaufKategorie();
+  if (preis > 0) {
+    await speichern('buchungen', { id: neueId(), datum: heute(), betrag: preis, art: 'ausgabe', kategorieId: katId,
+      notiz, wunschId: w.id, vorlageId: null, erstellt: jetzt });
+  }
+  const entnahme = Math.min(Math.max(0, topf), preis);
+  if (entnahme > 0) {
+    await speichern('buchungen', { id: neueId(), datum: heute(), betrag: -entnahme, art: 'sparen',
+      kategorieId: (await spartopfKategorie()).id, notiz: `Aus Spartopf: ${w.name}`, wunschId: w.id, vorlageId: null, erstellt: jetzt + 1 });
+  }
+}
+async function wunschErfuellt(w) {
+  await speichern('wuensche', { ...w, status: 'erfuellt', erfuelltAm: new Date().toISOString(), istZiel: false });
+  for (const v of daten.vorlagen.filter((x) => x.wunschId === w.id)) await loeschen('vorlagen', v.id); // Sparrate endet
+  formSchliessen();
+  render();
+  konfetti(); vibrieren([40, 60, 40]);
+  toast(`🎉 ${w.name} – erfüllt!`);
+}
+async function wunschKaufen(id) {
+  const w = daten.wuensche.find((x) => x.id === id);
+  if (!w) return;
+  if (w.typ === 'projekt') {
+    const offen = (w.teile || []).filter((t) => !t.gekauft);
+    const summe = offen.reduce((s, t) => s + t.preis, 0);
+    if (offen.length && !confirm(`Die ${offen.length} offenen Teile (${euro(summe)}) als gekauft eintragen und „${w.name}“ abschließen?`)) return;
+    for (const t of offen) await kaufBuchen(daten.wuensche.find((x) => x.id === id), t.preis, `${w.name}: ${t.name}`);
+    const teile = (w.teile || []).map((t) => (t.gekauft ? t : { ...t, gekauft: true, gekauftAm: heute() }));
+    return wunschErfuellt({ ...w, teile });
+  }
+  const topf = Math.max(0, wunschGespart(w));
+  if (!confirm(`„${w.name}“ als gekauft eintragen?\n\nEs wird eine Ausgabe über ${euro(w.preis)} gebucht`
+    + (topf ? ` und ${euro(Math.min(topf, w.preis))} aus dem Spartopf genommen.` : '.'))) return;
+  await kaufBuchen(w, w.preis, w.name);
+  await wunschErfuellt(w);
+}
+
+/* ---------------------------------------------------------------------
+   6c. Kredit / Vertrag bearbeiten (✎)
+   --------------------------------------------------------------------- */
+
+function kreditFormOeffnen(id) {
+  const k = daten.kredite.find((x) => x.id === id);
+  if (!k) return;
+  sheetOeffnen(`${sheetKopf(`Bearbeiten: ${esc(k.name)}`)}
+    <label class="feld"><span>Name</span><input type="text" id="ke-name" value="${esc(k.name)}"></label>
+    <label class="feld"><span>Monatliche Rate (€)</span><input type="text" inputmode="decimal" id="ke-rate" value="${centZuText(k.rate)}"></label>
+    <div class="label">Abbuchung am</div>
+    ${htmlTagWahl('ke-tag', k.tag || 1)}
+    ${k.typ === 'kredit' ? `
+      <label class="feld"><span>Zinssatz % (optional)</span><input type="text" inputmode="decimal" id="ke-zins" value="${k.zins ? String(k.zins).replace('.', ',') : ''}"></label>
+      <label class="feld"><span>Ursprünglicher Kreditbetrag (€, optional)</span><input type="text" inputmode="decimal" id="ke-ursprung" value="${k.ursprung ? centZuText(k.ursprung) : ''}"></label>
+      <div class="klein grau" style="margin-bottom:12px">Die Restschuld korrigierst du direkt in der Liste darunter.</div>`
+    : `<div class="label">Monat der letzten Rate</div>${htmlMonatWahl('ke-ende', k.ende)}<div style="height:12px"></div>`}
+    <button class="knopf haupt" data-action="kredit-speichern" data-id="${k.id}">Speichern</button>`);
+}
+async function kreditSpeichern(id) {
+  const k = daten.kredite.find((x) => x.id === id);
+  if (!k) return;
+  const wert = (feld) => document.getElementById(feld).value.trim();
+  const name = wert('ke-name');
+  const rate = centAusText(wert('ke-rate'));
+  const tag = tagLesen('ke-tag');
+  if (!name || !rate || rate <= 0) return toast('Bitte Name und Rate eingeben');
+  const neu = { ...k, name, rate, tag };
+  if (k.typ === 'kredit') {
+    neu.zins = Number(wert('ke-zins').replace(',', '.')) || 0;
+    neu.ursprung = centAusText(wert('ke-ursprung')) || null;
+    // Ab heute mit den neuen Werten weiterrechnen (die bisherige Tilgung bleibt erhalten)
+    if (rate !== k.rate || tag !== k.tag || neu.zins !== (k.zins || 0)) {
+      neu.restschuld = kreditInfo(k).restschuld;
+      neu.stichtag = heute();
+    }
+  } else {
+    neu.ende = monatLesen('ke-ende');
+  }
+  await speichern('kredite', neu);
+  // zugehörige regelmäßige Buchung mit anpassen
+  for (const v of daten.vorlagen.filter((x) => x.kreditId === id)) {
+    await speichern('vorlagen', { ...v, name, betrag: rate, tag });
+  }
+  formSchliessen();
+  render();
+  toast('Gespeichert ✓');
+}
+
+// Ziel-Karte angetippt → Details
+function zielDetailsOeffnen(id) {
+  if (id !== 'notgroschen') return wunschDetailsOeffnen(id);
+  const z = alleZiele().find((x) => x.id === 'notgroschen');
+  if (!z || !(z.betrag > 0)) { ansicht = 'einstellungen'; render(); window.scrollTo(0, 0); return; }
+  const pr = zielPrognose(z);
+  const pm = pufferMonate(daten.einst.puffer);
+  sheetOeffnen(`${sheetKopf(`${esc(z.emoji)} ${esc(z.name)}`)}
+    <div style="display:flex;gap:16px;align-items:center">${ringSvg(Math.min(1, z.stand / z.betrag), 100)}
+      <div><div class="zahl mittel" style="margin:0">${euroHtml(z.stand)}</div>
+        <div class="klein grau">von ${euro(z.betrag)}${z.termin ? ` · bis ${monatName(z.termin)}` : ''}</div>
+        ${pm !== null && daten.einst.zielGleichPuffer ? `<div class="klein">Puffer reicht für <b>${monateText(pm)} Monate</b></div>` : ''}</div></div>
+    <div class="ampel-box ${pr.ampel || ''}"><div class="klein">${pr.erreicht ? 'Ziel erreicht 🎉'
+      : pr.monat ? `${pr.ampel ? `<span class="ampel ${pr.ampel}"></span>` : ''}Bei deinem Tempo (${euro(z.tempo)}/Monat) erreicht im <b>${monatName(pr.monat)}</b>`
+      : pr.zuLang ? `Noch ${euro(pr.rest)} – bei deinem Tempo (${euro(z.tempo)}/Monat) über 10 Jahre.`
+      : `Noch ${euro(pr.rest)}. Leg eine Sparrate an (Einstellungen → Regelmäßige Buchungen, Art „Sparen“), dann siehst du, wann du es schaffst.`}</div></div>
+    ${htmlZielExtras(z)}
+    <div class="klein grau" style="margin-top:10px">Den Stand trägst du in den Einstellungen ein (Notgroschen-Konto).</div>
+    <div class="knopfreihe"><button class="knopf" data-action="ziel-einstellungen">Stand & Ziel ändern</button></div>`);
 }
 
 /* ---------------------------------------------------------------------
@@ -1137,7 +2325,7 @@ function backupJson() {
     app: 'meine-finanzen', format: 1, appVersion: APP_VERSION,
     exportiertAm: new Date().toISOString(),
     buchungen: daten.buchungen, kategorien: daten.kategorien,
-    vorlagen: daten.vorlagen, kredite: daten.kredite, einstellungen: daten.einst,
+    vorlagen: daten.vorlagen, kredite: daten.kredite, wuensche: daten.wuensche, einstellungen: daten.einst,
   };
   return JSON.stringify(paket, null, 2);
 }
@@ -1148,15 +2336,35 @@ async function backupErledigt() {
   render();
 }
 
-async function exportieren() {
-  const datei = new File([backupJson()], `finanzen-backup-${heute()}.json`, { type: 'application/json' });
-  const url = URL.createObjectURL(datei);
+// Datei im Ordner "Downloads" speichern
+function herunterladen(inhalt, name, typ) {
+  const url = URL.createObjectURL(new File([inhalt], name, { type: typ }));
   const a = document.createElement('a');
-  a.href = url; a.download = datei.name;
+  a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+async function exportieren() {
+  herunterladen(backupJson(), `finanzen-backup-${heute()}.json`, 'application/json');
   await backupErledigt();
   toast('Backup gespeichert (Ordner „Downloads“)');
+}
+
+// CSV für Excel: Semikolon, Komma als Dezimalzeichen, Ausgaben/Sparen mit Minus
+function csvExport() {
+  const zelle = (t) => (/[;"\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t);
+  const art = { ausgabe: 'Ausgabe', einnahme: 'Einnahme', sparen: 'Sparen' };
+  const zeilen = ['Datum;Art;Kategorie;Betrag;Notiz'];
+  for (const b of [...daten.buchungen].sort((a, c) => a.datum.localeCompare(c.datum))) {
+    const [j, m, t] = b.datum.split('-');
+    const wert = (b.art === 'einnahme' ? b.betrag : -b.betrag) / 100;
+    zeilen.push([`${t}.${m}.${j}`, art[b.art] || b.art, zelle(kat(b.kategorieId)?.name || ''),
+      wert.toFixed(2).replace('.', ','), zelle(b.notiz || '')].join(';'));
+  }
+  // \ufeff am Anfang, damit Excel die Umlaute richtig erkennt
+  herunterladen('\ufeff' + zeilen.join('\r\n'), `finanzen-${heute()}.csv`, 'text/csv;charset=utf-8');
+  toast(`${daten.buchungen.length} Buchungen als CSV gespeichert (Downloads)`);
 }
 
 // Über das Android-Teilen-Menü direkt an Google Drive, Mail usw. schicken
@@ -1190,6 +2398,7 @@ async function importieren(datei) {
   for (const k of p.kategorien || []) await dbPut('kategorien', mitZeit(k));
   for (const v of p.vorlagen || []) await dbPut('vorlagen', mitZeit(v));
   for (const k of p.kredite || []) await dbPut('kredite', mitZeit(k));
+  for (const w of p.wuensche || []) await dbPut('wuensche', mitZeit(w));
   await dbPut('einstellungen', mitZeit({ ...STANDARD_EINST, ...(p.einstellungen || {}), id: 'haupt' }));
   await allesLaden();
   if (daten.kategorien.length === 0) await startdatenAnlegen();
@@ -1300,9 +2509,14 @@ async function alleRohdaten() {
   for (const t of TABELLEN) roh[t] = await dbAlle(t);
   return roh;
 }
-// Pro Eintrag (gleiche id) gewinnt der mit der neueren Änderungszeit
+// Pro Eintrag (gleiche id) gewinnt der mit der neueren Änderungszeit.
+// Tabellen, die diese Version noch nicht kennt (von einer neueren App-Version),
+// werden unverändert mitgenommen, damit nichts verloren geht.
 function zusammenfuehren(a, b) {
   const ergebnis = {};
+  for (const quelle of [a, b]) {
+    for (const [t, liste] of Object.entries(quelle || {})) if (!TABELLEN.includes(t)) ergebnis[t] = liste;
+  }
   for (const t of TABELLEN) {
     const karte = new Map();
     for (const x of [...(a?.[t] || []), ...(b?.[t] || [])]) {
@@ -1441,7 +2655,7 @@ async function syncTrennen() {
 
 function htmlSync() {
   if (!syncZugang) {
-    return `<section class="karte"><h2>🔄 Abgleich zwischen Geräten</h2>
+    return `<section class="karte"><h2>${icon('sync')} Abgleich zwischen Geräten</h2>
       <div class="klein grau" style="margin-bottom:10px">Gleicht Handy und PC automatisch über dein privates GitHub-Repository ab.
         Die Daten werden vorher mit deinem Passwort verschlüsselt.</div>
       <label class="feld"><span>Repository (Name/Repo)</span><input type="text" id="s-repo" placeholder="Vellorift/finanzen-daten" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
@@ -1452,7 +2666,7 @@ function htmlSync() {
       <button class="knopf haupt" data-action="sync-einrichten">Abgleich einrichten</button>
     </section>`;
   }
-  return `<section class="karte"><h2>🔄 Abgleich zwischen Geräten</h2>
+  return `<section class="karte"><h2>${icon('sync')} Abgleich zwischen Geräten</h2>
     <div class="klein" style="margin-bottom:4px">Verbunden mit <b>${esc(syncZugang.repo)}</b></div>
     <div class="klein grau" id="sync-info" style="margin-bottom:12px">${syncInfoText()}</div>
     <div class="knopfreihe">
@@ -1463,14 +2677,154 @@ function htmlSync() {
 }
 
 /* ---------------------------------------------------------------------
+   7c. Darstellung, App-Sperre (Fingerabdruck) und Start-Bildschirm
+   --------------------------------------------------------------------- */
+
+const AKZENTE = { violett: '#8f7cff', mint: '#3ee6b4', blau: '#5aa9ff', orange: '#ff9f5a', pink: '#ff6fae' };
+function darstellungAnwenden() {
+  const e = daten.einst;
+  const f = AKZENTE[e.akzent] || AKZENTE.violett;
+  const r = document.documentElement;
+  r.style.setProperty('--akzent', f);
+  r.style.setProperty('--akzent-weich', `${f}29`); // gleiche Farbe, 16 % deckend
+  r.classList.toggle('amoled', !!e.amoled);
+  document.querySelector('meta[name=theme-color]').content = e.amoled ? '#000000' : '#0b0d11';
+}
+
+/* App-Sperre: nutzt die Bildschirmsperre des Handys (Fingerabdruck, Gesicht, PIN)
+   über WebAuthn – ohne Server. Gilt nur für dieses Gerät (Tabelle "geraet").
+   Schützt vor neugierigen Blicken, verschlüsselt die Daten auf dem Handy aber nicht. */
+let sperre = null;            // { id: 'sperre', credId } oder null
+let verstecktSeit = 0;
+const sperreMoeglich = () => !!(window.PublicKeyCredential && navigator.credentials?.create);
+
+function htmlSperreEinst() {
+  return `<section class="karte"><h2>${icon('schloss')} App-Sperre</h2>
+    <div class="klein grau" style="margin-bottom:10px">Beim Öffnen (und nach 1 Minute im Hintergrund) fragt die App nach deinem
+      Fingerabdruck bzw. deiner Display-Sperre. Gilt nur für dieses Gerät.</div>
+    ${!sperreMoeglich() ? '<div class="klein gelb">Dieser Browser unterstützt das leider nicht.</div>'
+      : sperre ? `<div class="klein gruen" style="margin-bottom:8px">${icon('haken')} Aktiv auf diesem Gerät</div>
+        <button class="knopf gefahr" data-action="sperre-aus">Sperre ausschalten</button>`
+      : '<button class="knopf" data-action="sperre-an">Mit Fingerabdruck sperren</button>'}
+  </section>`;
+}
+async function sperreEinrichten() {
+  try {
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp: { name: 'Meine Finanzen' },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'meine-finanzen', displayName: 'Meine Finanzen' },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' },
+      timeout: 60000,
+    } });
+    sperre = { id: 'sperre', credId: zuBase64(new Uint8Array(cred.rawId)) };
+    await dbPut('geraet', sperre);
+    render(); vibrieren(); toast('App-Sperre aktiv ✓');
+  } catch (err) {
+    toast(err.name === 'NotAllowedError' ? 'Abgebrochen' : `Geht hier nicht (${err.name})`);
+  }
+}
+async function sperreAusschalten() {
+  if (!confirm('App-Sperre auf diesem Gerät ausschalten?')) return;
+  await dbDelete('geraet', 'sperre');
+  sperre = null;
+  render(); toast('App-Sperre aus');
+}
+function sperreZeigen() {
+  if (!sperre || document.getElementById('sperre')) return;
+  formSchliessen();
+  const el = document.createElement('div');
+  el.id = 'sperre';
+  el.className = 'vollbild';
+  el.innerHTML = `<div style="font-size:3rem;color:var(--akzent)">${icon('schloss')}</div>
+    <div class="gross">Meine Finanzen</div><div class="grau">Gesperrt</div>
+    <button class="knopf haupt" style="max-width:260px;margin-top:10px" data-action="entsperren">Entsperren</button>`;
+  document.body.appendChild(el);
+  setTimeout(entsperren, 400); // gleich nach dem Fingerabdruck fragen
+}
+let entsperrenLaeuft = false;
+let nachEntsperren = null; // z. B. Formular öffnen, wenn die App über "Neue Ausgabe" gestartet wurde
+async function entsperren() {
+  if (entsperrenLaeuft || !document.getElementById('sperre')) return;
+  entsperrenLaeuft = true;
+  try {
+    await navigator.credentials.get({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      allowCredentials: [{ type: 'public-key', id: ausBase64(sperre.credId) }],
+      userVerification: 'required', timeout: 60000,
+    } });
+    const el = document.getElementById('sperre');
+    el.classList.add('weg');
+    setTimeout(() => el.remove(), 450);
+    if (nachEntsperren) { nachEntsperren(); nachEntsperren = null; } else startScreenZeigen();
+  } catch { /* abgebrochen → Knopf "Entsperren" bleibt */ }
+  entsperrenLaeuft = false;
+}
+
+// Start-Bildschirm: kurz dein Ziel mit Ring, dann gleitet er in die Übersicht
+let startTimer = null;
+function startScreenZeigen() {
+  const e = daten.einst;
+  if (e.startScreen === 'aus' || document.getElementById('startscreen')) return;
+  let gezeigt = null;
+  try { gezeigt = localStorage.getItem('startScreenTag'); } catch { /* egal */ }
+  if (e.startScreen !== 'immer' && gezeigt === heute()) return;
+  const z = alleZiele().find((x) => x.betrag > 0);
+  if (!z) return;
+  try { localStorage.setItem('startScreenTag', heute()); } catch { /* egal */ }
+  const el = document.createElement('div');
+  el.id = 'startscreen';
+  el.className = 'vollbild';
+  el.dataset.action = 'start-weg';
+  el.innerHTML = `<div style="font-size:2.6rem;line-height:1">${esc(z.emoji)}</div>
+    <div class="gross">${esc(z.name)}</div>
+    ${ringSvg(Math.min(1, z.stand / z.betrag), 170)}
+    <div style="max-width:300px;font-size:1.05rem">${startSatz(z)}</div>
+    <div class="klein grau" style="position:absolute;bottom:calc(30px + env(safe-area-inset-bottom))">Tippen zum Überspringen</div>`;
+  document.body.appendChild(el);
+  animieren(el);
+  startTimer = setTimeout(startScreenWeg, 2300);
+}
+function startScreenWeg() {
+  clearTimeout(startTimer);
+  const el = document.getElementById('startscreen');
+  if (!el) return;
+  el.classList.add('weg');
+  setTimeout(() => el.remove(), 450);
+}
+// Wechselnde Sätze, damit es nicht langweilig wird
+function startSatz(z) {
+  const rest = z.betrag - z.stand;
+  if (rest <= 0) return 'Ziel erreicht! 🎉 Zeit für ein neues?';
+  const jetzt = heute().slice(0, 7);
+  const vorher = sparSumme(monatVerschieben(jetzt, -1), z.id);
+  const saetze = [`Noch ${euroRund(rest)} bis ${esc(z.name)}${z.diesenMonat > vorher && vorher >= 0 && z.diesenMonat > 0
+    ? ` – ${euroRund(z.diesenMonat - vorher)} mehr als letzten Monat 💪` : ''}`];
+  saetze.push(z.diesenMonat > 0 ? `Diesen Monat schon ${euroRund(z.diesenMonat)} zurückgelegt 💪` : 'Diesen Monat noch nichts gespart – heute ist ein guter Tag dafür.');
+  saetze.push(`${prozent(z.stand / z.betrag)} geschafft – bleib dran!`);
+  const pr = zielPrognose(z);
+  if (pr.monat) {
+    const [j, m] = pr.monat.split('-').map(Number);
+    const tage = Math.max(1, Math.round((new Date(j, m - 1, 1) - new Date()) / 86400000));
+    saetze.push(`Bei deinem Tempo in ca. ${tage} Tagen geschafft (${monatName(pr.monat)}).`);
+  }
+  const pm = pufferMonate(daten.einst.puffer);
+  if (pm !== null && daten.einst.puffer > 0) saetze.push(`Dein Puffer reicht für ${monateText(pm)} Monate.`);
+  return saetze[Math.floor(Math.random() * saetze.length)];
+}
+
+/* ---------------------------------------------------------------------
    8. Bedienung und Start
    Alle Knöpfe haben ein "data-action"-Attribut. Ein einziger
    Klick-Empfänger schaut nach, welche Aktion gemeint ist.
    --------------------------------------------------------------------- */
 
+let wischGerade = 0; // Zeitpunkt der letzten Wischgeste (danach keinen Klick auslösen)
 document.addEventListener('click', async (ev) => {
   const el = ev.target.closest('[data-action], [data-view]');
   if (!el) return;
+  if (Date.now() - wischGerade < 350) return;
 
   if (el.dataset.view) {
     if (el.dataset.view !== ansicht) vorlageInBearbeitung = null;
@@ -1498,7 +2852,7 @@ document.addEventListener('click', async (ev) => {
     case 'form-loeschen':
       if (confirm('Diese Buchung wirklich löschen?')) {
         await loeschen('buchungen', form.id);
-        formSchliessen(); render(); toast('Gelöscht');
+        formSchliessen(); render(); vibrieren(); toast('Gelöscht');
       }
       break;
 
@@ -1717,6 +3071,168 @@ document.addEventListener('click', async (ev) => {
       break;
     }
 
+    // --- neu in 2.0 ---
+    case 'toast-knopf': {
+      const f = toastAktion;
+      document.getElementById('toast').hidden = true; toastAktion = null;
+      if (f) await f();
+      break;
+    }
+    case 'f-favorit': {
+      formArtSetzen('ausgabe');
+      form.kategorieId = el.dataset.kat;
+      document.querySelectorAll('#f-kats .chip').forEach((c) => c.classList.toggle('an', c.dataset.id === el.dataset.kat));
+      document.getElementById('f-betrag').value = centZuText(Number(el.dataset.betrag));
+      document.getElementById('f-notiz').value = el.dataset.name;
+      break;
+    }
+    case 'schnell-buchen': {
+      const b = { id: neueId(), datum: heute(), betrag: Number(el.dataset.betrag), art: 'ausgabe',
+        kategorieId: el.dataset.kat, notiz: el.dataset.name, vorlageId: null, erstellt: Date.now() };
+      await speichern('buchungen', b);
+      vibrieren(); render();
+      toast(`${b.notiz} ${euro(b.betrag)} gebucht`, 'Rückgängig', async () => { await loeschen('buchungen', b.id); render(); });
+      break;
+    }
+    case 'rueckblick-weg':
+      daten.einst.rueckblickGesehen = monatVerschieben(heute().slice(0, 7), -1);
+      await einstSpeichern(); render();
+      break;
+    case 'auswertung-tab': auswertungTab = el.dataset.tab; render(); break;
+    case 'analyse-monate': analyseMonate = Number(el.dataset.n); render(); break;
+    case 'budget-uebernehmen': {
+      const k = kat(id);
+      await speichern('kategorien', { ...k, budget: Number(el.dataset.betrag) });
+      render(); toast(`Budget für ${k.name}: ${euro(Number(el.dataset.betrag))} ✓`);
+      break;
+    }
+    case 'abo-geprueft': {
+      const v = daten.vorlagen.find((x) => x.id === id);
+      await speichern('vorlagen', { ...v, geprueft: Date.now() });
+      render(); toast('Als geprüft markiert ✓');
+      break;
+    }
+    case 'akzent-wahl': daten.einst.akzent = el.dataset.akzent; await einstSpeichern(); render(); break;
+    case 'csv': csvExport(); break;
+    case 'sperre-an': await sperreEinrichten(); break;
+    case 'sperre-aus': await sperreAusschalten(); break;
+    case 'entsperren': await entsperren(); break;
+    case 'start-weg': startScreenWeg(); break;
+    case 'ziel-details': zielDetailsOeffnen(id); break;
+    case 'ziel-einstellungen': formSchliessen(); ansicht = 'einstellungen'; render(); window.scrollTo(0, 0); break;
+
+    // Kredit bearbeiten
+    case 'kredit-bearbeiten': kreditFormOeffnen(id); break;
+    case 'kredit-speichern': await kreditSpeichern(id); break;
+
+    // Wünsche
+    case 'wunsch-neu': wunschFormOeffnen(null, el.dataset.typ); break;
+    case 'wunsch-details': wunschDetailsOeffnen(id); break;
+    case 'wunsch-bearbeiten': wunschFormOeffnen(daten.wuensche.find((w) => w.id === id)); break;
+    case 'wunsch-gekauft': await wunschKaufen(id); break;
+    case 'wunsch-ziel': {
+      const w = daten.wuensche.find((x) => x.id === id);
+      await speichern('wuensche', { ...w, istZiel: !w.istZiel });
+      if (wunschOffen === id) wunschDetailsOeffnen(id);
+      render(); toast(w.istZiel ? 'Nicht mehr als Ziel oben' : '⭐ Wird jetzt oben in der Übersicht gezeigt');
+      break;
+    }
+    case 'wunsch-hoch': case 'wunsch-runter': {
+      const liste = offeneWuensche();
+      const i = liste.findIndex((w) => w.id === id);
+      const j = i + (el.dataset.action === 'wunsch-hoch' ? -1 : 1);
+      if (i < 0 || j < 0 || j >= liste.length) break;
+      [liste[i], liste[j]] = [liste[j], liste[i]];
+      for (let n = 0; n < liste.length; n++) {
+        if (liste[n].reihenfolge !== n) await speichern('wuensche', { ...liste[n], reihenfolge: n });
+      }
+      render();
+      break;
+    }
+    case 'wunsch-loeschen': {
+      const w = daten.wuensche.find((x) => x.id === id);
+      if (!w || !confirm(`„${w.name}“ löschen?${wunschGespart(w) > 0 ? `\n\nIm Spartopf liegen ${euro(wunschGespart(w))} – die Spar-Buchungen bleiben erhalten.` : ''}`)) break;
+      await loeschen('wuensche', id);
+      for (const v of daten.vorlagen.filter((x) => x.wunschId === id)) await loeschen('vorlagen', v.id);
+      formSchliessen(); render(); toast('Gelöscht');
+      break;
+    }
+    case 'spartopf-ein': case 'spartopf-aus': {
+      const w = daten.wuensche.find((x) => x.id === wunschOffen);
+      const betrag = centAusText(document.getElementById('wd-betrag').value);
+      if (!w || !betrag || betrag <= 0) return toast('Bitte einen Betrag eingeben');
+      const raus = el.dataset.action === 'spartopf-aus';
+      if (raus && betrag > wunschGespart(w)) return toast(`Im Spartopf sind nur ${euro(wunschGespart(w))}`);
+      await speichern('buchungen', { id: neueId(), datum: heute(), betrag: raus ? -betrag : betrag, art: 'sparen',
+        kategorieId: (await spartopfKategorie()).id, notiz: `${raus ? 'Aus Spartopf' : 'Spartopf'}: ${w.name}`,
+        wunschId: w.id, vorlageId: null, erstellt: Date.now() });
+      vibrieren();
+      wunschDetailsOeffnen(w.id); render();
+      toast(raus ? `${euro(betrag)} entnommen` : `${euro(betrag)} eingezahlt 💪`);
+      break;
+    }
+    case 'sparrate-neu': {
+      const w = daten.wuensche.find((x) => x.id === wunschOffen);
+      const betrag = centAusText(document.getElementById('wd-rate').value);
+      if (!w || !betrag || betrag <= 0) return toast('Bitte einen Betrag eingeben');
+      const gehalt = daten.vorlagen.find((v) => v.art === 'einnahme');
+      await speichern('vorlagen', { id: neueId(), name: `Spartopf: ${w.name}`, betrag, art: 'sparen',
+        kategorieId: (await spartopfKategorie()).id, tag: gehalt?.tag || 1, intervall: 1, startMonat: null, wunschId: w.id });
+      wunschDetailsOeffnen(w.id); render();
+      toast('Sparrate angelegt ✓ – erscheint jeden Monat bei den regelmäßigen Buchungen');
+      break;
+    }
+    case 'sparrate-weg': {
+      const w = daten.wuensche.find((x) => x.id === wunschOffen);
+      if (!w || !confirm('Monatliche Sparrate für diesen Wunsch beenden? (Das Geld im Spartopf bleibt.)')) break;
+      for (const v of daten.vorlagen.filter((x) => x.wunschId === w.id)) await loeschen('vorlagen', v.id);
+      wunschDetailsOeffnen(w.id); render();
+      break;
+    }
+    case 'teil-gekauft': {
+      const w = daten.wuensche.find((x) => x.id === wunschOffen);
+      const t = w?.teile?.find((x) => x.id === el.dataset.tid);
+      if (!t || !confirm(`„${t.name}“ für ${euro(t.preis)} als gekauft eintragen?`)) break;
+      await kaufBuchen(w, t.preis, `${w.name}: ${t.name}`);
+      const teile = w.teile.map((x) => (x.id === t.id ? { ...x, gekauft: true, gekauftAm: heute() } : x));
+      if (teile.every((x) => x.gekauft)) { await wunschErfuellt({ ...w, teile }); break; }
+      await speichern('wuensche', { ...w, teile });
+      vibrieren();
+      wunschDetailsOeffnen(w.id); render(); toast(`${t.name} gekauft ✓`);
+      break;
+    }
+    // Wunsch-Formular
+    case 'wf-typ': {
+      wfTeileLesen();
+      wf.typ = el.dataset.typ;
+      if (wf.typ === 'projekt' && !wf.teile.length) {
+        const preis = centAusText(document.getElementById('wf-preis').value) || 0;
+        wf.teile.push({ id: neueId(), name: preis ? (document.getElementById('wf-name').value.trim() || 'Hauptsache') : '', preis });
+        document.getElementById('wf-teile').innerHTML = wfTeileHtml();
+      }
+      el.parentElement.querySelectorAll('button').forEach((b) => b.classList.toggle('an', b === el));
+      document.getElementById('wf-preis-box').hidden = wf.typ === 'projekt';
+      document.getElementById('wf-teile-box').hidden = wf.typ !== 'projekt';
+      break;
+    }
+    case 'wf-prio':
+      wf.prio = el.dataset.prio;
+      document.querySelectorAll('#wf-prio .chip').forEach((c) => c.classList.toggle('an', c === el));
+      break;
+    case 'wf-teil-neu': {
+      wfTeileLesen();
+      wf.teile.push({ id: neueId(), name: '', preis: 0 });
+      document.getElementById('wf-teile').innerHTML = wfTeileHtml();
+      [...document.querySelectorAll('.wf-teil-name')].pop()?.focus();
+      break;
+    }
+    case 'wf-teil-weg':
+      wfTeileLesen();
+      wf.teile = wf.teile.filter((t) => t.id !== el.dataset.tid);
+      document.getElementById('wf-teile').innerHTML = wfTeileHtml();
+      break;
+    case 'wf-speichern': await wunschFormSpeichern(); break;
+
     // Abgleich
     case 'sync-einrichten': await syncEinrichten(); break;
     case 'sync-jetzt':      await syncen(); break;
@@ -1753,6 +3269,21 @@ document.addEventListener('change', async (ev) => {
     toast('Gespeichert ✓');
     return;
   }
+
+  // Suche/Filter in Buchungen, Was-wäre-wenn, Wunschtermine
+  if (el.id === 'such-kat') { suchKat = el.value; document.getElementById('buchungsliste').innerHTML = htmlBuchungsliste(); return; }
+  if (el.id === 'ww-kat') { wasWaereKat = el.value; wasWaereBetrag = 0; render(); return; }
+  if (el.id === 'wf-mit-termin') { document.getElementById('wf-termin-box').hidden = !el.checked; return; }
+  if (el.id === 'ziel-mit-termin') {
+    daten.einst.zielTermin = el.checked ? monatVerschieben(heute().slice(0, 7), 12) : null;
+    await einstSpeichern(); render(); return;
+  }
+  if (el.closest('[data-ziel-termin]')) {
+    daten.einst.zielTermin = monatLesen('ziel-termin');
+    await einstSpeichern(); toast(`Wunschtermin: ${monatName(daten.einst.zielTermin)} ✓`); return;
+  }
+  // Felder in Formularen werden erst beim Speichern gelesen (Ausnahme: Häkchen „Regelmäßig“)
+  if (el.closest('.sheet') && el.id !== 'f-wiederkehrend') return;
 
   if (el.id === 'v-art') { document.getElementById('v-kat').innerHTML = katOptionenFuer(el.value); return; }
 
@@ -1804,6 +3335,12 @@ document.addEventListener('change', async (ev) => {
     const k = kat(el.dataset.id);
     const feld = el.dataset.katFeld;
     if (feld === 'fix') k.fix = el.checked;
+    else if (feld === 'budget') {
+      const c = el.value.trim() ? centAusText(el.value) : 0;
+      if (c === null || c < 0) { toast('Ungültiger Betrag'); el.value = k.budget ? centZuText(k.budget) : ''; return; }
+      k.budget = c;
+      el.value = c ? centZuText(c) : '';
+    }
     else if (feld === 'name') { if (!el.value.trim()) { el.value = k.name; return; } k.name = el.value.trim(); }
     else k[feld] = el.value;
     await speichern('kategorien', k);
@@ -1814,19 +3351,102 @@ document.addEventListener('change', async (ev) => {
 // Zurück-Taste bei offenem Formular → Formular schließen statt App verlassen
 window.addEventListener('popstate', () => formSchliessen(true));
 
+// Tippen in Suchfeld / Schieben am Regler → sofort aktualisieren (ohne die ganze Seite neu zu zeichnen)
+document.addEventListener('input', (ev) => {
+  const el = ev.target;
+  if (el.id === 'such-feld') {
+    suchText = el.value;
+    document.getElementById('buchungsliste').innerHTML = htmlBuchungsliste();
+  } else if (el.id === 'ww-regler') {
+    wasWaereBetrag = Number(el.value);
+    document.getElementById('ww-betrag').textContent = euro(wasWaereBetrag);
+    const z = hauptZiel();
+    if (z) document.getElementById('ww-ergebnis').innerHTML = wasWaereText(z, wasWaereBetrag);
+  }
+});
+
+/* Wischgesten:
+   - Buchung nach links wischen = löschen (mit "Rückgängig")
+   - sonst in Übersicht/Buchungen links/rechts wischen = Monat wechseln
+   - die Ziel-Karten oben wischen sich selbst (eingebautes Scrollen) */
+let wisch = null;
+document.addEventListener('touchstart', (ev) => {
+  wisch = null;
+  if (ev.touches.length !== 1 || sheetOffen || document.querySelector('.vollbild')) return;
+  if (ev.target.closest('input, select, textarea, .ziele, .segment')) return;
+  const t = ev.touches[0];
+  wisch = { x: t.clientX, y: t.clientY, dx: 0, richtung: null, buchung: ev.target.closest('.buchung') };
+}, { passive: true });
+document.addEventListener('touchmove', (ev) => {
+  if (!wisch) return;
+  const t = ev.touches[0];
+  const dx = t.clientX - wisch.x, dy = t.clientY - wisch.y;
+  if (!wisch.richtung && (Math.abs(dx) > 12 || Math.abs(dy) > 12)) wisch.richtung = Math.abs(dx) > Math.abs(dy) * 1.3 ? 'h' : 'v';
+  if (wisch.richtung !== 'h') return;
+  wisch.dx = dx;
+  if (wisch.buchung && dx < 0) { wisch.buchung.classList.remove('gleitet'); wisch.buchung.style.transform = `translateX(${dx}px)`; }
+}, { passive: true });
+document.addEventListener('touchend', () => {
+  const w = wisch;
+  wisch = null;
+  if (!w || w.richtung !== 'h') return;
+  wischGerade = Date.now();
+  if (w.buchung && w.dx < 0) {
+    const b = w.buchung;
+    b.classList.add('gleitet');
+    if (w.dx < -110) { b.style.transform = 'translateX(-110%)'; setTimeout(() => buchungWegwischen(b.dataset.id), 230); }
+    else b.style.transform = '';
+    return;
+  }
+  if ((ansicht === 'uebersicht' || ansicht === 'buchungen') && Math.abs(w.dx) > 80) {
+    aktMonat = monatVerschieben(aktMonat, w.dx < 0 ? 1 : -1);
+    render();
+  }
+});
+async function buchungWegwischen(id) {
+  const alt = daten.buchungen.find((b) => b.id === id);
+  if (!alt) return;
+  await loeschen('buchungen', id);
+  vibrieren(); render();
+  toast('Buchung gelöscht', 'Rückgängig', async () => { await speichern('buchungen', { ...alt }); render(); toast('Wiederhergestellt ✓'); });
+}
+
 async function start() {
+  // App-Verknüpfungen (lange aufs App-Symbol drücken): ?aktion=neu / ?ansicht=wuensche
+  const param = new URLSearchParams(location.search);
+  if (NAV.some((x) => x && x[0] === param.get('ansicht'))) ansicht = param.get('ansicht');
+  const sofortNeu = param.get('aktion') === 'neu';
+  if (location.search) history.replaceState(null, '', location.pathname);
+
+  navAufbauen();
+  let geraet = [];
   try {
     db = await dbOeffnen();
     await allesLaden();
     if (daten.kategorien.length === 0) await startdatenAnlegen(); // allererster Start
+    geraet = await dbAlle('geraet');
+    sperre = geraet.find((x) => x.id === 'sperre') || null;
     render();
   } catch (err) {
     document.getElementById('inhalt').innerHTML =
       `<div class="leer">Fehler beim Laden der Daten:<br>${esc(err.message)}</div>`;
     return;
   }
+  if (sperre) {                          // erst entsperren, danach Start-Bildschirm bzw. Formular
+    if (sofortNeu) nachEntsperren = () => formOeffnen(null);
+    sperreZeigen();
+  }
+  else if (sofortNeu) formOeffnen(null);
+  else startScreenZeigen();
+
+  // Nach 1 Minute im Hintergrund wieder sperren
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') verstecktSeit = Date.now();
+    else if (sperre && verstecktSeit && Date.now() - verstecktSeit > 60000) sperreZeigen();
+  });
+
   // Abgleich: Zugang dieses Geräts laden und gleich einmal abgleichen
-  const zugang = (await dbAlle('geraet')).find((x) => x.id === 'sync');
+  const zugang = geraet.find((x) => x.id === 'sync');
   if (zugang) {
     syncZugang = zugang;
     syncStatusSetzen('ok');
