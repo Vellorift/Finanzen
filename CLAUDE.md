@@ -6,7 +6,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 - **App:** https://vellorift.github.io/finanzen/
 - **Code:** GitHub-Repository `Vellorift/finanzen` (öffentlich, Branch `main`, GitHub Pages aus `/ (root)`)
 - **Abgleich-Daten:** privates Repository `Vellorift/finanzen-daten`, dort nur die verschlüsselte Datei `daten.json`
-- **Aktuelle Version:** 2.1.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
+- **Aktuelle Version:** 2.1.1 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
 
 ## Wer ist der Nutzer / wie arbeiten wir
 
@@ -123,8 +123,8 @@ Neue Tabellen nur über eine höhere `DB_VERSION` anlegen. Neue Felder brauchen 
 - **1.8** Eigener Kalender, Monat/Jahr-Auswahl, Rhythmus vierteljährlich/halbjährlich/jährlich, Tab „📈 Ausblick“ (Prognose 12/24/36 Monate, Kontostand-Verlauf, Kreditende, geplante Zahlungen, Rücklage für Quartalszahlungen)
 - **1.9** Einmalig anderer Betrag pro Monat bei regelmäßigen Buchungen (✎ → „Nur einmalig anderer Betrag“, z. B. Prämie, Sondertilgung senkt die Restschuld). Fällt eine regelmäßige Zahlung aufs Wochenende → folgender Montag (läge der im nächsten Monat → Freitag davor). Kredit/Vertrag laut Plan fertig → Nachfrage „Ist alles bezahlt?“, gelöscht wird erst nach „Ja“; bei „Nein“ Restschuld bzw. letzten Monat korrigieren (Vertragsende jetzt in den Einstellungen änderbar)
 - **2.0** Großes Update (Ideen A, C, E, F, G): neues Design (tiefes Schwarz, Akzentfarbe wählbar, AMOLED, SVG-Symbole, schwebende Navigation mit (+) in der Mitte, Eingabe als Bottom Sheet, Cent klein, Animationen, Vibration, Buchungen nach Tag gruppiert, Wischgesten). Ziel-Karten ganz oben (Ring, Prognose, Ampel, Meilensteine) + Start-Bildschirm. Wünsche & Traum-Projekte mit mehreren Teilen (Ampel „Jetzt okay / Ab Monat / Gerade nicht“, Spartopf, Sparrate, Gedanken-Pause, Arbeitsstunden, Gekauft, Reihenfolge). Auswertung: Analyse mit Spar-Vorschlägen und Was-wäre-wenn-Regler, Ausblick, Abo-Übersicht. Budgets pro Kategorie, Suche & Filter, Schnell-Buchen, Monatsrückblick, App-Sperre per Fingerabdruck, CSV-Export, ✎ Kredite bearbeiten, App-Verknüpfungen
-
 - **2.1** Screenshot-Import (Idee B): Screenshot der Banking-App (Raiffeisen: Umsatzliste oder Umsatzdetails) → Texterkennung mit Tesseract direkt auf dem Gerät → Vorschau mit Haken, Datum/Betrag/Notiz/Kategorie änderbar → übernehmen (mit Rückgängig). Erkennt Duplikate, merkt sich Kategorien, PayPal-/Klarna-Händler aus dem Verwendungszweck. Auch über „Teilen → Finanzen“ (Share Target) und als eingefügter Text. Knöpfe: Buchungen → „Screenshot importieren“ und im Formular „Neue Buchung“
+- **2.1.1** Screenshot-Knopf passt jetzt ins Design: als Symbol-Knopf (Bild) neben Suche/Filter in Buchungen und oben rechts neben dem ✕ im Formular „Neue Buchung“ (`sheetKopf(titel, extra)`)
 
 ## Fahrplan / offene Punkte
 

@@ -24,7 +24,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.1.1';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -1363,10 +1363,10 @@ function htmlBuchungen() {
   const kats = [...kategorienVon('ausgabe'), ...kategorienVon('einnahme'), ...kategorienVon('sparen')];
   return `<div class="suche">
       <input type="search" id="such-feld" placeholder="Suchen: Notiz, Kategorie, Betrag …" value="${esc(suchText)}" autocomplete="off">
-      <select id="such-kat" style="width:auto;max-width:42%"><option value="">Alle</option>
+      <select id="such-kat" style="width:auto;max-width:36%"><option value="">Alle</option>
         ${kats.map((k) => `<option value="${k.id}" ${k.id === suchKat ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}</select>
+      <button class="such-knopf" data-action="imp-oeffnen" aria-label="Screenshot importieren">${icon('bild')}</button>
     </div>
-    <button class="knopf klein" data-action="imp-oeffnen" style="margin:-4px 0 12px">${icon('bild')} Screenshot importieren</button>
     <div id="buchungsliste" style="display:flex;flex-direction:column;gap:12px">${htmlBuchungsliste()}</div>`;
 }
 function buchungPasst(b, suche) {
@@ -1897,8 +1897,9 @@ function sheetOeffnen(html) {
     history.pushState({ formular: true }, ''); // damit die Zurück-Taste das Sheet schließt
   }
 }
-const sheetKopf = (titel) => `<div class="sheet-kopf"><h1>${titel}</h1>
-  <button class="x" data-action="form-schliessen" aria-label="Schließen">${icon('kreuz')}</button></div>`;
+// extra = zusätzliche Knöpfe oben rechts neben dem ✕ (z. B. Screenshot-Import)
+const sheetKopf = (titel, extra = '') => `<div class="sheet-kopf"><h1>${titel}</h1>
+  <div class="kopf-knoepfe">${extra}<button class="x" data-action="form-schliessen" aria-label="Schließen">${icon('kreuz')}</button></div></div>`;
 
 function formSchliessen(durchZurueckTaste) {
   if (!sheetOffen) return;
@@ -1915,13 +1916,13 @@ function formOeffnen(buchung) {
   form = buchung ? { ...buchung }
     : { art: 'ausgabe', betrag: null, kategorieId: null, datum: standardDatum, notiz: '' };
   const fav = form.id ? [] : favoriten();
-  sheetOeffnen(`${sheetKopf(form.id ? 'Buchung bearbeiten' : 'Neue Buchung')}
+  sheetOeffnen(`${sheetKopf(form.id ? 'Buchung bearbeiten' : 'Neue Buchung',
+    form.id ? '' : `<button class="x akzent" data-action="imp-oeffnen" aria-label="Aus Screenshot importieren">${icon('bild')}</button>`)}
     <div class="segment">
       <button data-action="f-art" data-art="ausgabe">Ausgabe</button>
       <button data-action="f-art" data-art="einnahme">Einnahme</button>
       <button data-action="f-art" data-art="sparen">Sparen</button>
     </div>
-    ${form.id ? '' : `<button type="button" class="chip schnell imp-chip" data-action="imp-oeffnen">${icon('bild')} Aus Screenshot importieren</button>`}
     <input id="f-betrag" class="betrag-eingabe" type="text" inputmode="decimal" placeholder="0,00 €"
       value="${form.betrag != null ? centZuText(form.betrag) : ''}" autocomplete="off">
     ${fav.length ? `<div class="chips" style="margin-top:-6px">${fav.map((f) => `<button type="button" class="chip schnell" data-action="f-favorit"

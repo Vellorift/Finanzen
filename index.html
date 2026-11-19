@@ -114,6 +114,8 @@
     flex:none; font-weight:700; font-size:.95rem; }
   .suche { display:flex; gap:8px; align-items:center; }
   .suche input { flex:1; }
+  .such-knopf { flex:none; width:46px; height:46px; border:1px solid var(--rand2); background:var(--karte); border-radius:12px;
+    color:var(--akzent); display:inline-flex; align-items:center; justify-content:center; }
 
   /* Navigation unten (schwebend) mit rundem Plus-Knopf in der Mitte */
   nav.unten { position:fixed; left:10px; right:10px; bottom:calc(10px + env(safe-area-inset-bottom)); z-index:6;
@@ -182,6 +184,8 @@
   .x { border:0; background:var(--karte3); border-radius:11px; width:36px; height:36px; flex:none; color:var(--grau);
     display:inline-flex; align-items:center; justify-content:center; }
   .x.an { color:var(--gelb); }
+  .x.akzent { color:var(--akzent); }
+  .kopf-knoepfe { display:flex; gap:8px; }
   .x.an .ic { fill:currentColor; }
   .zwei { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   .farbwahl { display:flex; gap:10px; margin:6px 0 14px; }
@@ -214,7 +218,6 @@
   .tagwahl { margin:6px 0 14px; align-items:center; }
   .tagwahl .chip { padding:8px 12px; }
   /* Screenshot-Import */
-  .imp-chip { margin:2px 0 14px; }
   .imp-zeile { border:1px solid var(--rand2); border-radius:16px; padding:10px; margin-bottom:10px; background:var(--karte); transition:opacity .2s; }
   .imp-zeile.aus { opacity:.45; }
   .imp-kopf { display:flex; align-items:center; gap:10px; }
