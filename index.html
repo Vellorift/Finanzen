@@ -213,6 +213,23 @@
   .bearbeiten-box { border:1px solid var(--akzent); border-radius:14px; padding:4px 12px 12px; margin-top:12px; }
   .tagwahl { margin:6px 0 14px; align-items:center; }
   .tagwahl .chip { padding:8px 12px; }
+  /* Screenshot-Import */
+  .imp-chip { margin:2px 0 14px; }
+  .imp-zeile { border:1px solid var(--rand2); border-radius:16px; padding:10px; margin-bottom:10px; background:var(--karte); transition:opacity .2s; }
+  .imp-zeile.aus { opacity:.45; }
+  .imp-kopf { display:flex; align-items:center; gap:10px; }
+  .imp-kopf input[type=checkbox] { width:22px; height:22px; flex:none; accent-color:var(--akzent); }
+  .imp-kopf input[type=text] { font-weight:600; }
+  .imp-felder { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; }
+  .imp-felder select { grid-column:1 / -1; }
+  .imp-betrag { display:flex; align-items:center; gap:4px; font-weight:700; }
+  .imp-betrag input { text-align:right; font-weight:700; color:inherit; }
+  .imp-zeile input, .imp-zeile select { background:var(--karte2); }
+  input.fehler { border-color:var(--rot); }
+  .imp-roh { white-space:pre-wrap; font-size:.75rem; color:var(--grau); max-height:240px; overflow:auto; }
+  .imp-text-box summary { cursor:pointer; padding:6px 0; }
+  .imp-dreh { display:inline-block; width:12px; height:12px; border:2px solid var(--blau); border-right-color:transparent; border-radius:50%; animation:drehen .8s linear infinite; vertical-align:-1px; }
+  @keyframes drehen { to { transform:rotate(360deg); } }
   .tagwahl .tag-eingabe { width:80px; flex:none; }
   .erweitert { background:var(--karte2); border-radius:14px; padding:10px 12px; margin-bottom:12px; }
   .erweitert summary { cursor:pointer; color:var(--akzent); font-weight:600; }

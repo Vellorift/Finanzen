@@ -6,7 +6,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 - **App:** https://vellorift.github.io/finanzen/
 - **Code:** GitHub-Repository `Vellorift/finanzen` (öffentlich, Branch `main`, GitHub Pages aus `/ (root)`)
 - **Abgleich-Daten:** privates Repository `Vellorift/finanzen-daten`, dort nur die verschlüsselte Datei `daten.json`
-- **Aktuelle Version:** 2.0.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
+- **Aktuelle Version:** 2.1.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
 
 ## Wer ist der Nutzer / wie arbeiten wir
 
@@ -20,6 +20,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 ## Technische Vorgaben (nicht ändern ohne Rückfrage)
 
 - **Keine Build-Tools, kein Framework, keine externen Bibliotheken.** Reines HTML/CSS/JavaScript, möglichst wenige Dateien.
+  - **Einzige Ausnahme (vom Nutzer erlaubt, 19.11.2026):** Tesseract (Texterkennung) im Ordner `ocr/` für den Screenshot-Import. Liegt im eigenen Repo (kein CDN), wird erst bei Bedarf geladen. Der Import muss **komplett in der App und kostenlos** bleiben → keine Claude API o. Ä.
 - **Kein Server, kein Konto, keine Kosten.** Alle Daten lokal in IndexedDB. Der optionale Abgleich läuft über das private GitHub-Repository (verschlüsselt).
 - Mobil-optimiert, **Dark Mode**, Beträge in Euro, deutsches Zahlenformat (`12,50 €`).
 - Keine nativen Datums- oder Monatsfelder (`<input type="date">` / `type="month"`), die gefallen dem Nutzer optisch nicht. Stattdessen gibt es eigene Bausteine (siehe unten).
@@ -31,7 +32,10 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 | `index.html` | Grundgerüst + **alle CSS-Stile** (Farben oben in `:root`) |
 | `app.js` | Die komplette Logik, in nummerierte Abschnitte gegliedert (siehe unten) |
 | `sw.js` | Service Worker: offline nutzbar, Stale-while-revalidate (`fetch(url, {cache:'no-cache'})`) |
-| `manifest.json` | Name, Icons, Farben, App-Verknüpfungen (lange aufs Symbol drücken: Neue Ausgabe · Übersicht · Wünsche) |
+| `manifest.json` | Name, Icons, Farben, App-Verknüpfungen (lange aufs Symbol drücken: Neue Ausgabe · Übersicht · Wünsche), `share_target` („Teilen → Finanzen“) |
+| `ocr/ocr-worker.js` | Texterkennung im Hintergrund (Worker): lädt Tesseract, liefert TSV (Wörter mit Position) |
+| `ocr/tesseract-core-simd-lstm.js/.wasm` | Tesseract-Kern v7 (aus GitHub `naptha/tesseract.js-core`), Apache-2.0 (`ocr/LIZENZ-Tesseract.txt`) |
+| `ocr/deu.traineddata` | Deutsche Sprachdaten (`tesseract-ocr/tessdata_fast`), ca. 1,5 MB |
 | `icon-192.png`, `icon-512.png` | App-Symbol (3 steigende Balken, auch als maskable) |
 | `CLAUDE.md` | Diese Beschreibung |
 
@@ -52,6 +56,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 7. Backup (JSON-Export, Teilen als `.txt`, weil Android-Chrome `.json` beim Teilen ablehnt, Wiederherstellen, **CSV-Export** für Excel)
 7b. Abgleich zwischen Geräten (Verschlüsselung, GitHub-API, Zusammenführen)
 7c. Darstellung (`AKZENTE`, AMOLED), App-Sperre per WebAuthn, Start-Bildschirm
+7d. Screenshot-Import: `bildAufbereiten()` (dunkles Design umkehren, Kontrast `(v-30)*255/170`) → `ocrLesen()` (Worker) → `tsvZeilen()` → `importParsen()` (Raiffeisen: Umsatzliste mit Tagesüberschrift = Kontostand, nicht buchen; Umsatzdetails; eingefügter Text) → `impBezeichnung()` (PayPal „PP.xxxx.PP/. Händler“, Klarna „Purchase at Händler“) → `impKategorie()` (gemerkt → frühere Buchung mit gleicher Notiz → Stichworte → Sonstiges) → Vorschau `importVorschau()` (Duplikate: gleiche Art + Betrag, ±3 Tage; „Datum prüfen“, wenn die Tagesreihenfolge nicht passt) → `importSpeichern()`. Teilen: Service Worker nimmt POST `./teilen` an, legt Bilder in Cache `finanzen-geteilt`, öffnet `./?geteilt=1` → `geteiltLaden()`
 8. Bedienung (ein zentraler Klick-Empfänger über `data-action` / `data-view`, `change`- und `input`-Empfänger, Wischgesten) und `start()`
 
 ### Bedienung (seit 2.0)
@@ -74,7 +79,7 @@ Gelöschte Einträge bleiben als Löschmarkierung `{ id, geloescht: true, geaend
   - `vertrag` (z. B. Leasing): `ende` (`"2028-03"` = Monat der letzten Rate)
 - **wuensche** (neu in 2.0): `typ` (`wunsch` | `projekt`), `name`, `emoji`, `preis` (nur Wunsch), `teile` (nur Projekt: `[{ id, name, preis, gekauft, gekauftAm }]`), `prio` (`muss` | `schoen` | `spass`), `termin` (`"2027-05"` oder null), `startGespart`, `kategorieId` (für die Kauf-Buchung), `link`, `notiz`, `istZiel` (⭐ = Karte oben), `reihenfolge`, `angelegt` (ms), `status` (`offen` | `erfuellt`), `erfuelltAm`
   - Spartopf = `startGespart` + alle `sparen`-Buchungen mit dieser `wunschId` (wird berechnet, nicht gespeichert)
-- **einstellungen:** ein Eintrag `id: 'haupt'`, u. a. `puffer`, `zielName`, `zielBetrag`, `zielGleichPuffer`, `zielStand`, `kleinGrenze`, `letztesBackup`, `kontoStand`, `kontoStichtag`, `kontoZeit`; seit 2.0: `zielTermin`, `zielAnzeigen`, `kontoUntergrenze` (Wünsche-Ampel), `stundenlohn`, `pauseGrenze`, `akzent`, `amoled`, `startScreen` (`immer`|`taeglich`|`aus`), `rueckblickGesehen`, `meilensteine`
+- **einstellungen:** ein Eintrag `id: 'haupt'`, u. a. `puffer`, `zielName`, `zielBetrag`, `zielGleichPuffer`, `zielStand`, `kleinGrenze`, `letztesBackup`, `kontoStand`, `kontoStichtag`, `kontoZeit`; seit 2.0: `zielTermin`, `zielAnzeigen`, `kontoUntergrenze` (Wünsche-Ampel), `stundenlohn`, `pauseGrenze`, `akzent`, `amoled`, `startScreen` (`immer`|`taeglich`|`aus`), `rueckblickGesehen`, `meilensteine`; seit 2.1: `importKategorien` (`{ "riot games": kategorieId }`, Screenshot-Import merkt sich die Kategorie)
 - **geraet:** nur für dieses Gerät, **wird nie abgeglichen oder gesichert**. Eintrag `id: 'sync'` mit `repo`, `token`, `schluessel` (nicht exportierbarer CryptoKey), `salt`, `zuletzt`; Eintrag `id: 'sperre'` mit `credId` (App-Sperre per Fingerabdruck)
 - **localStorage** `startScreenTag`: an welchem Tag der Start-Bildschirm zuletzt kam (pro Gerät)
 
@@ -96,6 +101,7 @@ Neue Tabellen nur über eine höhere `DB_VERSION` anlegen. Neue Felder brauchen 
 - Abgleich testen: GitHub-API per `context.route('https://api.github.com/**', …)` nachbauen und zwei getrennte Browser-Kontexte als „Handy“ und „PC“ verwenden. Prüfen: verschlüsselt, falsches Passwort wird erkannt, keine doppelten Kategorien, Löschungen kommen an, gleichzeitige Änderungen gehen nicht verloren.
 - Achtung: `[data-view=einstellungen]` gibt es mehrfach (⚙ oben = `#einst-knopf`, Statuspunkt). In Tests `nav [data-view=…]` bzw. `#einst-knopf` verwenden.
 - Start-Bildschirm überdeckt beim ersten Öffnen des Tages alles → in Tests `#startscreen` wegtippen. Wischgesten per CDP `Input.dispatchTouchEvent`, App-Sperre per CDP `WebAuthn.addVirtualAuthenticator` testen.
+- Screenshot-Import testen: Datei-Auswahl per `page.expect_file_chooser()` (der Knopf erzeugt ein `<input type=file>`), Bilder des Nutzers (Raiffeisen, dunkles Design). Teilen nachspielen: `fetch('teilen', {method:'POST', body: FormData mit 'bilder'})` bei aktivem Service Worker, dann `./?geteilt=1` öffnen.
 - Update von einer älteren Version testen: alte Dateien ausliefern, Daten anlegen, dann neue Dateien in denselben Ordner kopieren (gleicher Port = gleiche Datenbank).
 
 ## Commits
@@ -118,9 +124,10 @@ Neue Tabellen nur über eine höhere `DB_VERSION` anlegen. Neue Felder brauchen 
 - **1.9** Einmalig anderer Betrag pro Monat bei regelmäßigen Buchungen (✎ → „Nur einmalig anderer Betrag“, z. B. Prämie, Sondertilgung senkt die Restschuld). Fällt eine regelmäßige Zahlung aufs Wochenende → folgender Montag (läge der im nächsten Monat → Freitag davor). Kredit/Vertrag laut Plan fertig → Nachfrage „Ist alles bezahlt?“, gelöscht wird erst nach „Ja“; bei „Nein“ Restschuld bzw. letzten Monat korrigieren (Vertragsende jetzt in den Einstellungen änderbar)
 - **2.0** Großes Update (Ideen A, C, E, F, G): neues Design (tiefes Schwarz, Akzentfarbe wählbar, AMOLED, SVG-Symbole, schwebende Navigation mit (+) in der Mitte, Eingabe als Bottom Sheet, Cent klein, Animationen, Vibration, Buchungen nach Tag gruppiert, Wischgesten). Ziel-Karten ganz oben (Ring, Prognose, Ampel, Meilensteine) + Start-Bildschirm. Wünsche & Traum-Projekte mit mehreren Teilen (Ampel „Jetzt okay / Ab Monat / Gerade nicht“, Spartopf, Sparrate, Gedanken-Pause, Arbeitsstunden, Gekauft, Reihenfolge). Auswertung: Analyse mit Spar-Vorschlägen und Was-wäre-wenn-Regler, Ausblick, Abo-Übersicht. Budgets pro Kategorie, Suche & Filter, Schnell-Buchen, Monatsrückblick, App-Sperre per Fingerabdruck, CSV-Export, ✎ Kredite bearbeiten, App-Verknüpfungen
 
+- **2.1** Screenshot-Import (Idee B): Screenshot der Banking-App (Raiffeisen: Umsatzliste oder Umsatzdetails) → Texterkennung mit Tesseract direkt auf dem Gerät → Vorschau mit Haken, Datum/Betrag/Notiz/Kategorie änderbar → übernehmen (mit Rückgängig). Erkennt Duplikate, merkt sich Kategorien, PayPal-/Klarna-Händler aus dem Verwendungszweck. Auch über „Teilen → Finanzen“ (Share Target) und als eingefügter Text. Knöpfe: Buchungen → „Screenshot importieren“ und im Formular „Neue Buchung“
+
 ## Fahrplan / offene Punkte
 
-- **Noch offen aus der Ideenliste:** B (Screenshot-Auswertung), aus A: Wischgeste zum Schließen des Bottom Sheets
+- **Noch offen aus der Ideenliste:** aus A: Wischgeste zum Schließen des Bottom Sheets. Screenshot-Import: easybank-App erlaubt keine Screenshots → dort CSV-Import (Version 2) oder Online-Banking am PC
 - **Version 2:** CSV-Import des Kontoauszugs aus dem Online-Banking (einmalige Spaltenzuordnung, die gespeichert wird; Duplikate erkennen; Kategorien vorschlagen), richtige **Diagramme**, **Monatsvergleich** über mehrere Monate
-- **Version 3:** Screenshot-Import. Vorher dem Nutzer die Optionen mit Vor- und Nachteilen zeigen: Tesseract.js (kostenlos, läuft lokal, ungenauer) vs. Claude API (genauer, kostet Gebühren, Daten verlassen das Gerät)
 - Bekannte Grenzen: Puffer/Notgroschen wird von Hand eingetragen. Der Girokonto-Stand stimmt nur, wenn alle Ausgaben eingetragen sind (darum regelmäßig mit ✎ abgleichen). „Wiederherstellen“ ersetzt die lokalen Daten.
