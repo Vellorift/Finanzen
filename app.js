@@ -24,7 +24,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '2.1.1';
+const APP_VERSION = '2.2.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -2921,6 +2921,24 @@ function impDatum(text) {
   }
   return null;
 }
+// Benachrichtigung: „3,87 EUR bei REWE Rade Savic oHG.“
+const IMP_BENACHR = /(\d{1,3}(?:\.\d{3})*)\s?[,.]\s?(\d{2})\s*(?:EUR|€)\s+(bei|an|von)\s+(.+)/i;
+// Datum für Benachrichtigungen: volles Datum, sonst Statusleiste „Fr., 20. Nov.“, sonst heute
+// („gestern“ in der Benachrichtigung → einen Tag früher)
+function impBenachrDatum(alles) {
+  const voll = impDatum(alles);
+  if (voll) return voll;
+  const KURZ = ['jan', 'feb', 'mar', 'apr', 'mai', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dez'];
+  const m = alles.match(/(\d{1,2})\.\s*(Jan|Feb|M[äa]r|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)[a-zä]*\.?/i);
+  let d = new Date();
+  if (m) {
+    const kandidat = new Date(d.getFullYear(), KURZ.indexOf(m[2].slice(0, 3).toLowerCase().replace('ä', 'a')), Number(m[1]));
+    if (kandidat > d) kandidat.setFullYear(d.getFullYear() - 1); // Dezember-Bild im Januar importiert
+    d = kandidat;
+  }
+  if (/\bgestern\b/i.test(alles)) d.setDate(d.getDate() - 1);
+  return datumText(d);
+}
 const impBuchstaben = (t) => (t.match(/[A-Za-zÄÖÜäöüß]/g) || []).length;
 const impSauber = (t) => t.replace(/\s*(\.{2,}|…)\s*$/, '').replace(/\s+/g, ' ').trim();
 
@@ -2959,7 +2977,29 @@ function importParsen(zeilen) {
   zeilen = zeilen.filter((z) => z.text && z.text.trim());
   const alles = zeilen.map((z) => z.text).join('\n');
 
-  // a) Detailansicht: ein großer Betrag, darüber der Name, darunter das Datum
+  // a) Benachrichtigung (z. B. easybank): „Zahlung erfolgreich – 3,87 EUR bei REWE …“
+  //    „bei“/„an“ = Ausgabe, „von“ = Geld bekommen. Datum aus der Statusleiste („Fr., 20. Nov.“), sonst heute.
+  if (!zeilen.some((z) => /^\s*\d{1,2}\.\d{1,2}\.\d{4}\s+\S*\d,\d{2}/.test(z.text))) {
+    const benachr = [];
+    const datum = impBenachrDatum(alles);
+    zeilen.forEach((z, i) => {
+      const m = z.text.match(IMP_BENACHR);
+      if (!m) return;
+      let name = m[4];
+      // langer Name in die nächste Zeile umgebrochen? (Zeile endet nicht mit Punkt)
+      const naechste = zeilen[i + 1]?.text || '';
+      if (!/\.\s*$/.test(name) && /^[A-ZÄÖÜa-zäöü0-9&.\- ]{2,30}\.?$/.test(naechste) && !IMP_BETRAG.test(naechste)
+        && !/^(Verwalten|Alle löschen|Antworten|Öffnen)/i.test(naechste.trim())) name += ' ' + naechste;
+      name = impSauber(name.replace(/\.\s*$/, '')).replace(/[,\s]+(oHG|OHG|GmbH|e\.\s?K\.?|KG|AG|UG|GmbH & Co\.? KG)\.?$/i, '');
+      const cent = Number(m[1].replace(/\D/g, '')) * 100 + Number(m[2]);
+      if (cent && impBuchstaben(name) >= 2) {
+        benachr.push({ datum, betrag: cent, art: /von/i.test(m[3]) ? 'einnahme' : 'ausgabe', notiz: name, roh: z.text });
+      }
+    });
+    if (benachr.length) return benachr;
+  }
+
+  // b) Detailansicht: ein großer Betrag, darüber der Name, darunter das Datum
   if (/Verwendungszweck|Umsatzdetails|Zahlungsempf/i.test(alles) && !zeilen.some((z) => /^\s*\d{1,2}\.\d{1,2}\.\d{4}\s+\S*\d,\d{2}/.test(z.text))) {
     const iB = zeilen.findIndex((z) => {
       const m = z.text.match(IMP_BETRAG);
@@ -2986,7 +3026,7 @@ function importParsen(zeilen) {
     return b ? [b] : [];
   }
 
-  // b) Umsatzliste: Tagesüberschrift "29.09.2026  2.365,05 EUR" (= Kontostand, nicht buchen),
+  // c) Umsatzliste: Tagesüberschrift "29.09.2026  2.365,05 EUR" (= Kontostand, nicht buchen),
   //    darunter Zeilen "Name  -3,00 EUR" und darunter der Verwendungszweck
   const ergebnis = [];
   let tag = null;
@@ -3061,7 +3101,7 @@ function impKategorie(z) {
 function importOeffnen() {
   imp = null;
   sheetOeffnen(`${sheetKopf('Aus Screenshot importieren')}
-    <div class="klein grau" style="margin-bottom:14px">Screenshot aus deiner Banking-App wählen – die Umsatzliste oder die Umsatzdetails.
+    <div class="klein grau" style="margin-bottom:14px">Screenshot aus deiner Banking-App wählen – Umsatzliste, Umsatzdetails oder eine Zahlungs-Benachrichtigung (z. B. easybank).
       Die Texterkennung läuft nur auf deinem Handy, nichts wird hochgeladen. Danach kannst du alles prüfen, bevor es gespeichert wird.</div>
     <button class="knopf haupt" data-action="imp-bild">${icon('bild')} Screenshot(s) wählen</button>
     <div id="imp-status" class="klein blau" style="margin:10px 0;min-height:1.2em"></div>
@@ -3116,7 +3156,7 @@ async function importAuswerten(dateien, text) {
   if (!gefunden.length) {
     importStatus('');
     const box = document.getElementById('imp-status');
-    if (box) box.innerHTML = `<span class="gelb">Keine Buchungen erkannt.</span> Am besten klappt es mit der Umsatzliste oder den Umsatzdetails.
+    if (box) box.innerHTML = `<span class="gelb">Keine Buchungen erkannt.</span> Am besten klappt es mit der Umsatzliste, den Umsatzdetails oder einer Zahlungs-Benachrichtigung.
       <details style="margin-top:6px"><summary>Erkannter Text</summary><pre class="imp-roh">${esc(rohTexte.join('\n---\n'))}</pre></details>`;
     return;
   }

@@ -6,7 +6,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 - **App:** https://vellorift.github.io/finanzen/
 - **Code:** GitHub-Repository `Vellorift/finanzen` (öffentlich, Branch `main`, GitHub Pages aus `/ (root)`)
 - **Abgleich-Daten:** privates Repository `Vellorift/finanzen-daten`, dort nur die verschlüsselte Datei `daten.json`
-- **Aktuelle Version:** 2.1.1 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
+- **Aktuelle Version:** 2.2.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
 
 ## Wer ist der Nutzer / wie arbeiten wir
 
@@ -56,7 +56,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 7. Backup (JSON-Export, Teilen als `.txt`, weil Android-Chrome `.json` beim Teilen ablehnt, Wiederherstellen, **CSV-Export** für Excel)
 7b. Abgleich zwischen Geräten (Verschlüsselung, GitHub-API, Zusammenführen)
 7c. Darstellung (`AKZENTE`, AMOLED), App-Sperre per WebAuthn, Start-Bildschirm
-7d. Screenshot-Import: `bildAufbereiten()` (dunkles Design umkehren, Kontrast `(v-30)*255/170`) → `ocrLesen()` (Worker) → `tsvZeilen()` → `importParsen()` (Raiffeisen: Umsatzliste mit Tagesüberschrift = Kontostand, nicht buchen; Umsatzdetails; eingefügter Text) → `impBezeichnung()` (PayPal „PP.xxxx.PP/. Händler“, Klarna „Purchase at Händler“) → `impKategorie()` (gemerkt → frühere Buchung mit gleicher Notiz → Stichworte → Sonstiges) → Vorschau `importVorschau()` (Duplikate: gleiche Art + Betrag, ±3 Tage; „Datum prüfen“, wenn die Tagesreihenfolge nicht passt) → `importSpeichern()`. Teilen: Service Worker nimmt POST `./teilen` an, legt Bilder in Cache `finanzen-geteilt`, öffnet `./?geteilt=1` → `geteiltLaden()`
+7d. Screenshot-Import: `bildAufbereiten()` (dunkles Design umkehren, Kontrast `(v-30)*255/170`) → `ocrLesen()` (Worker) → `tsvZeilen()` → `importParsen()` (a) Benachrichtigung, z. B. easybank „3,87 EUR bei REWE … oHG.“: bei/an = Ausgabe, von = Einnahme, Rechtsform wird abgeschnitten, Datum aus Statusleiste „Fr., 20. Nov.“ bzw. „gestern“, sonst heute (`impBenachrDatum()`); b) Raiffeisen-Details; c) Raiffeisen-Liste. Bisher: Umsatzliste mit Tagesüberschrift = Kontostand, nicht buchen; Umsatzdetails; eingefügter Text) → `impBezeichnung()` (PayPal „PP.xxxx.PP/. Händler“, Klarna „Purchase at Händler“) → `impKategorie()` (gemerkt → frühere Buchung mit gleicher Notiz → Stichworte → Sonstiges) → Vorschau `importVorschau()` (Duplikate: gleiche Art + Betrag, ±3 Tage; „Datum prüfen“, wenn die Tagesreihenfolge nicht passt) → `importSpeichern()`. Teilen: Service Worker nimmt POST `./teilen` an, legt Bilder in Cache `finanzen-geteilt`, öffnet `./?geteilt=1` → `geteiltLaden()`
 8. Bedienung (ein zentraler Klick-Empfänger über `data-action` / `data-view`, `change`- und `input`-Empfänger, Wischgesten) und `start()`
 
 ### Bedienung (seit 2.0)
@@ -125,9 +125,10 @@ Neue Tabellen nur über eine höhere `DB_VERSION` anlegen. Neue Felder brauchen 
 - **2.0** Großes Update (Ideen A, C, E, F, G): neues Design (tiefes Schwarz, Akzentfarbe wählbar, AMOLED, SVG-Symbole, schwebende Navigation mit (+) in der Mitte, Eingabe als Bottom Sheet, Cent klein, Animationen, Vibration, Buchungen nach Tag gruppiert, Wischgesten). Ziel-Karten ganz oben (Ring, Prognose, Ampel, Meilensteine) + Start-Bildschirm. Wünsche & Traum-Projekte mit mehreren Teilen (Ampel „Jetzt okay / Ab Monat / Gerade nicht“, Spartopf, Sparrate, Gedanken-Pause, Arbeitsstunden, Gekauft, Reihenfolge). Auswertung: Analyse mit Spar-Vorschlägen und Was-wäre-wenn-Regler, Ausblick, Abo-Übersicht. Budgets pro Kategorie, Suche & Filter, Schnell-Buchen, Monatsrückblick, App-Sperre per Fingerabdruck, CSV-Export, ✎ Kredite bearbeiten, App-Verknüpfungen
 - **2.1** Screenshot-Import (Idee B): Screenshot der Banking-App (Raiffeisen: Umsatzliste oder Umsatzdetails) → Texterkennung mit Tesseract direkt auf dem Gerät → Vorschau mit Haken, Datum/Betrag/Notiz/Kategorie änderbar → übernehmen (mit Rückgängig). Erkennt Duplikate, merkt sich Kategorien, PayPal-/Klarna-Händler aus dem Verwendungszweck. Auch über „Teilen → Finanzen“ (Share Target) und als eingefügter Text. Knöpfe: Buchungen → „Screenshot importieren“ und im Formular „Neue Buchung“
 - **2.1.1** Screenshot-Knopf passt jetzt ins Design: als Symbol-Knopf (Bild) neben Suche/Filter in Buchungen und oben rechts neben dem ✕ im Formular „Neue Buchung“ (`sheetKopf(titel, extra)`)
+- **2.2** Screenshot-Import erkennt auch Zahlungs-Benachrichtigungen (z. B. easybank „Zahlung erfolgreich – 3,87 EUR bei REWE …“), mehrere auf einem Bild, „von …“ = Einnahme
 
 ## Fahrplan / offene Punkte
 
-- **Noch offen aus der Ideenliste:** aus A: Wischgeste zum Schließen des Bottom Sheets. Screenshot-Import: easybank-App erlaubt keine Screenshots → dort CSV-Import (Version 2) oder Online-Banking am PC
+- **Noch offen aus der Ideenliste:** aus A: Wischgeste zum Schließen des Bottom Sheets. easybank-App erlaubt keine Screenshots → Benachrichtigungen screenshotten (seit 2.2) oder CSV-Import (Version 2)
 - **Version 2:** CSV-Import des Kontoauszugs aus dem Online-Banking (einmalige Spaltenzuordnung, die gespeichert wird; Duplikate erkennen; Kategorien vorschlagen), richtige **Diagramme**, **Monatsvergleich** über mehrere Monate
 - Bekannte Grenzen: Puffer/Notgroschen wird von Hand eingetragen. Der Girokonto-Stand stimmt nur, wenn alle Ausgaben eingetragen sind (darum regelmäßig mit ✎ abgleichen). „Wiederherstellen“ ersetzt die lokalen Daten.
