@@ -24,7 +24,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -132,6 +132,7 @@ const SYMBOLE = {
   stift: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M14 6l4 4"/>',
   pfeilhoch: '<path d="M12 19V5M6 11l6-6 6 6"/>',
   pfeilrunter: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  winkel: '<path d="M6 9l6 6 6-6"/>',
   wiederholen: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/>',
   blitz: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
   kalender: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
@@ -944,6 +945,7 @@ function navAufbauen() {
     ? `<button data-view="${x[0]}"><span class="pille">${icon(x[1])}</span>${x[2]}</button>`
     : `<button class="fab" data-action="neu" aria-label="Neue Buchung">${icon('plus')}</button>`)).join('');
   document.getElementById('einst-knopf').innerHTML = icon('zahnrad');
+  document.getElementById('einst-such-knopf').innerHTML = icon('suche');
 }
 
 function render() {
@@ -951,6 +953,10 @@ function render() {
   document.querySelectorAll('nav [data-view]').forEach(
     (b) => b.classList.toggle('aktiv', b.dataset.view === ansicht));
   document.getElementById('einst-knopf').classList.toggle('aktiv', ansicht === 'einstellungen');
+  const lupe = document.getElementById('einst-such-knopf');
+  lupe.hidden = ansicht !== 'einstellungen';
+  lupe.classList.toggle('aktiv', einstSucheAn);
+  document.querySelector('.pfeil[data-action=monat-vor]').hidden = ansicht === 'einstellungen';
   const mitMonat = ansicht === 'uebersicht' || ansicht === 'buchungen';
   document.getElementById('titel-text').textContent = mitMonat ? monatName(aktMonat)
     : { auswertung: 'Auswertung', wuensche: 'Wünsche & Träume', einstellungen: 'Einstellungen' }[ansicht];
@@ -971,6 +977,7 @@ function render() {
     animieren(main);
   }
   if (ansicht === 'uebersicht') { karussellStarten(); meilensteinePruefen(); }
+  if (ansicht === 'einstellungen') einstAufbauen(main);
 }
 
 // Beträge hochzählen lassen + Ringe füllen
@@ -1193,7 +1200,7 @@ function htmlUebersicht() {
   const pm = e.puffer > 0 && d.schnitt > 0 ? e.puffer / d.schnitt : null;
   h += `<div class="raster">
     <section class="karte"><div class="label">Sparquote</div><div class="wert ${sqFarbe}">${z.sparquote === null ? '–' : prozent(z.sparquote)}</div></section>
-    <section class="karte tippbar" data-view="einstellungen"><div class="label">Puffer ${euro(e.puffer)}</div>
+    <section class="karte tippbar" data-view="einstellungen" data-bereich="puffer"><div class="label">Puffer ${euro(e.puffer)}</div>
       <div class="wert ${pm === null ? '' : pm >= 3 ? 'gruen' : pm >= 1 ? 'gelb' : 'rot'}">${pm === null ? '–' : `${monateText(pm)} Mon.`}</div></section>
   </div>`;
 
@@ -1877,6 +1884,138 @@ function htmlEinstellungen() {
   <div class="klein grau" style="text-align:center">Meine Finanzen · Version ${APP_VERSION}</div>`;
 }
 
+/* Einstellungen als aufklappbare Bereiche + Suche (seit 2.3)
+   htmlEinstellungen() liefert weiter normale Karten. einstAufbauen() macht danach aus jeder Karte
+   einen Bereich mit Kopfzeile (antippen = auf/zu) und ordnet sie in Gruppen. */
+const EINST_BEREICHE = [
+  // [Schlüssel, Anfang der Überschrift, Gruppe, Kurzbeschreibung, Suchwörter]
+  ['puffer', 'Puffer', 'Geld & Ziele', 'Notgroschen, Sparziel, Wunschtermin', 'notgroschen rücklage sparziel ziel termin karte'],
+  ['vorlagen', 'Regelmäßige', 'Geld & Ziele', 'Fixkosten, Gehalt, Sparrate', 'vorlage fixkosten miete gehalt sparrate abo monatlich jährlich versicherung'],
+  ['kredite', 'Kredite', 'Geld & Ziele', 'Restschuld, Raten, Leasing', 'kredit vertrag leasing ratenkauf rate restschuld zins tilgung'],
+  ['budgets', 'Budgets', 'Geld & Ziele', 'Grenze pro Kategorie und Monat', 'budget limit grenze warnung'],
+  ['kategorien', 'Kategorien', 'Geld & Ziele', 'Namen, Farben, Fixkosten', 'kategorie farbe fix einnahme ausgabe'],
+  ['wuensche', 'Wünsche', 'Geld & Ziele', 'Ampel, Stundenlohn, Gedanken-Pause', 'wunsch ampel girokonto stundenlohn pause spaß'],
+  ['klein', 'Kleine', 'Geld & Ziele', 'Grenze für kleine Ausgaben', 'klein kleinkram grenze'],
+  ['darstellung', 'Darstellung', 'App', 'Akzentfarbe, AMOLED, Start-Bildschirm', 'farbe design akzent amoled schwarz dunkel start bildschirm'],
+  ['abgleich', 'Abgleich', 'App', 'Daten zwischen Handy und PC', 'sync github synchronisieren handy pc passwort token verschlüsselt'],
+  ['sperre', 'App-Sperre', 'App', 'Fingerabdruck beim Öffnen', 'sperre fingerabdruck entsperren schutz sicherheit pin'],
+  ['backup', 'Backup', 'App', 'Sichern, wiederherstellen, CSV', 'backup sichern export wiederherstellen csv excel teilen datei'],
+];
+const einstOffen = new Set();   // welche Bereiche gerade aufgeklappt sind
+let einstSucheAn = false, einstSuche = '';
+
+const suchNorm = (t) => String(t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+function einstAufbauen(main) {
+  const karten = [...main.querySelectorAll(':scope > section.karte')];
+  const rest = [...main.children].filter((x) => !karten.includes(x)); // z. B. die Versionszeile
+  const box = document.createDocumentFragment();
+
+  // Suchleiste (nur wenn die Lupe an ist)
+  if (einstSucheAn) {
+    const s = document.createElement('div');
+    s.className = 'einst-suche';
+    s.innerHTML = `${icon('suche')}<input type="text" id="einst-such-feld" enterkeyhint="search" placeholder="Einstellung suchen …" autocomplete="off" value="${esc(einstSuche)}">
+      <button class="x" data-action="einst-suche-zu" aria-label="Suche schließen">${icon('kreuz')}</button>`;
+    box.appendChild(s);
+  }
+
+  let letzteGruppe = '';
+  const sortiert = karten.map((k) => {
+    const titel = k.querySelector(':scope > h2')?.textContent.trim() || '';
+    const info = EINST_BEREICHE.find((b) => titel.startsWith(b[1])) || [titel, titel, 'Sonstiges', '', ''];
+    return { k, info };
+  }).sort((a, b) => EINST_BEREICHE.indexOf(a.info) - EINST_BEREICHE.indexOf(b.info));
+
+  for (const { k, info } of sortiert) {
+    const [schluessel, , gruppe, beschreibung, woerter] = info;
+    if (gruppe !== letzteGruppe) {
+      const g = document.createElement('div');
+      g.className = 'einst-gruppe';
+      g.textContent = gruppe;
+      box.appendChild(g);
+      letzteGruppe = gruppe;
+    }
+    const h2 = k.querySelector(':scope > h2');
+    const inhalt = document.createElement('div');
+    inhalt.className = 'bereich-inhalt';
+    while (h2.nextSibling) inhalt.appendChild(h2.nextSibling);
+    const kopf = document.createElement('button');
+    kopf.className = 'bereich-kopf';
+    kopf.dataset.action = 'einst-bereich';
+    kopf.dataset.bereich = schluessel;
+    kopf.innerHTML = `<span class="bereich-ic">${h2.querySelector('.ic')?.outerHTML || ''}</span>
+      <span class="bereich-text"><b>${esc(h2.textContent.trim())}</b><span>${esc(beschreibung)}</span></span>
+      <span class="bereich-pfeil">${icon('winkel')}</span>`;
+    h2.replaceWith(kopf);
+    k.appendChild(inhalt);
+    k.classList.add('bereich');
+    k.dataset.bereich = schluessel;
+    k.dataset.woerter = woerter;
+    // Wird gerade eine regelmäßige Buchung bearbeitet? Dann den Bereich offen lassen
+    if (schluessel === 'vorlagen' && vorlageInBearbeitung) einstOffen.add('vorlagen');
+    k.classList.toggle('offen', einstOffen.has(schluessel));
+    box.appendChild(k);
+  }
+  const leer = document.createElement('div');
+  leer.className = 'klein grau einst-leer';
+  leer.hidden = true;
+  leer.textContent = 'Nichts gefunden.';
+  box.appendChild(leer);
+  rest.forEach((r) => box.appendChild(r));
+  main.replaceChildren(box);
+  einstFiltern();
+}
+
+// Suche: passende Bereiche aufklappen, alles andere ausblenden
+function einstFiltern() {
+  const main = document.getElementById('inhalt');
+  const q = suchNorm(einstSucheAn ? einstSuche : '');
+  let treffer = 0;
+  main.querySelectorAll('section.bereich').forEach((k) => {
+    const inhalt = k.querySelector('.bereich-inhalt');
+    const teile = [...inhalt.children];
+    teile.forEach((t) => t.classList.remove('such-aus'));
+    if (!q) {
+      k.hidden = false;
+      k.classList.toggle('offen', einstOffen.has(k.dataset.bereich));
+      return;
+    }
+    const kopfText = suchNorm(k.querySelector('.bereich-kopf').textContent + ' ' + k.dataset.woerter);
+    const begriffe = q.split(' ');
+    const passt = (text) => begriffe.every((b) => text.includes(b));
+    if (passt(kopfText)) { k.hidden = false; k.classList.add('offen'); treffer++; return; }
+    // Sonst einzelne Zeilen im Bereich durchsuchen (auch Inhalte der Felder)
+    let gefunden = 0;
+    teile.forEach((t) => {
+      const werte = [...t.querySelectorAll('input:not([type=checkbox]):not([type=color]), select')]
+        .map((f) => (f.tagName === 'SELECT' ? f.selectedOptions[0]?.textContent : f.value)).join(' ');
+      const ok = passt(suchNorm(t.textContent + ' ' + werte));
+      t.classList.toggle('such-aus', !ok);
+      if (ok) gefunden++;
+    });
+    k.hidden = !gefunden;
+    k.classList.toggle('offen', !!gefunden);
+    if (gefunden) treffer++;
+  });
+  main.querySelectorAll('.einst-gruppe').forEach((g) => {
+    let n = g.nextElementSibling, sichtbar = false;
+    while (n && n.classList.contains('bereich')) { if (!n.hidden) sichtbar = true; n = n.nextElementSibling; }
+    g.hidden = !!q && !sichtbar;
+  });
+  const leer = main.querySelector('.einst-leer');
+  if (leer) leer.hidden = !q || treffer > 0;
+}
+
+// Bereich aufklappen und hinscrollen (z. B. „Kredit korrigieren“)
+function einstZeigen(bereich, elementId) {
+  einstOffen.add(bereich);
+  const k = document.querySelector(`section.bereich[data-bereich="${bereich}"]`);
+  if (k) { k.hidden = false; k.classList.add('offen'); }
+  const ziel = (elementId && document.getElementById(elementId)) || k;
+  ziel?.scrollIntoView({ block: elementId ? 'center' : 'start' });
+}
+
 /* ---------------------------------------------------------------------
    6. Eingabe-Formulare – alle als "Bottom Sheet" (schiebt sich von unten hoch)
    --------------------------------------------------------------------- */
@@ -2306,7 +2445,7 @@ async function kreditSpeichern(id) {
 function zielDetailsOeffnen(id) {
   if (id !== 'notgroschen') return wunschDetailsOeffnen(id);
   const z = alleZiele().find((x) => x.id === 'notgroschen');
-  if (!z || !(z.betrag > 0)) { ansicht = 'einstellungen'; render(); window.scrollTo(0, 0); return; }
+  if (!z || !(z.betrag > 0)) { ansicht = 'einstellungen'; einstOffen.add('puffer'); render(); window.scrollTo(0, 0); return; }
   const pr = zielPrognose(z);
   const pm = pufferMonate(daten.einst.puffer);
   sheetOeffnen(`${sheetKopf(`${esc(z.emoji)} ${esc(z.name)}`)}
@@ -3305,8 +3444,9 @@ document.addEventListener('click', async (ev) => {
   if (Date.now() - wischGerade < 350) return;
 
   if (el.dataset.view) {
-    if (el.dataset.view !== ansicht) vorlageInBearbeitung = null;
+    if (el.dataset.view !== ansicht) { vorlageInBearbeitung = null; einstSucheAn = false; einstSuche = ''; }
     ansicht = el.dataset.view;
+    if (el.dataset.bereich) einstOffen.add(el.dataset.bereich);
     render();
     window.scrollTo(0, 0);
     return;
@@ -3317,6 +3457,29 @@ document.addEventListener('click', async (ev) => {
     case 'monat-zurueck': aktMonat = monatVerschieben(aktMonat, -1); render(); break;
     case 'monat-vor':     aktMonat = monatVerschieben(aktMonat, 1);  render(); break;
     case 'neu':           formOeffnen(null); break;
+
+    // Einstellungen: Bereich auf-/zuklappen, Suche
+    case 'einst-bereich': {
+      const k = el.closest('section.bereich');
+      const b = el.dataset.bereich;
+      if (einstSucheAn && einstSuche) { k.classList.toggle('offen'); break; }
+      if (einstOffen.has(b)) einstOffen.delete(b); else einstOffen.add(b);
+      k.classList.toggle('offen', einstOffen.has(b));
+      if (einstOffen.has(b)) setTimeout(() => {
+        const r = k.getBoundingClientRect();
+        if (r.top < 60 || r.top > innerHeight * 0.6) k.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 30);
+      break;
+    }
+    case 'einst-suche':
+      einstSucheAn = !einstSucheAn;
+      if (!einstSucheAn) einstSuche = '';
+      render();
+      if (einstSucheAn) { window.scrollTo(0, 0); document.getElementById('einst-such-feld')?.focus(); }
+      break;
+    case 'einst-suche-zu':
+      einstSucheAn = false; einstSuche = ''; render();
+      break;
 
     // Screenshot-Import
     case 'imp-oeffnen':   importOeffnen(); break;
@@ -3523,8 +3686,8 @@ document.addEventListener('click', async (ev) => {
     }
     case 'kredit-fertig-nein': {
       const k = daten.kredite.find((x) => x.id === id);
-      ansicht = 'einstellungen'; vorlageInBearbeitung = null; render();
-      document.getElementById(`kredit-${id}`)?.scrollIntoView({ block: 'center' });
+      ansicht = 'einstellungen'; vorlageInBearbeitung = null; einstSucheAn = false; einstSuche = ''; render();
+      einstZeigen('kredite', `kredit-${id}`);
       toast(k?.typ === 'vertrag' ? 'Trag hier den richtigen Monat der letzten Rate ein' : 'Trag hier die echte Restschuld ein');
       break;
     }
@@ -3603,7 +3766,7 @@ document.addEventListener('click', async (ev) => {
     case 'entsperren': await entsperren(); break;
     case 'start-weg': startScreenWeg(); break;
     case 'ziel-details': zielDetailsOeffnen(id); break;
-    case 'ziel-einstellungen': formSchliessen(); ansicht = 'einstellungen'; render(); window.scrollTo(0, 0); break;
+    case 'ziel-einstellungen': formSchliessen(); ansicht = 'einstellungen'; einstOffen.add('puffer'); render(); window.scrollTo(0, 0); break;
 
     // Kredit bearbeiten
     case 'kredit-bearbeiten': kreditFormOeffnen(id); break;
@@ -3810,7 +3973,7 @@ document.addEventListener('change', async (ev) => {
     k.ende = monatLesen(`kr-ende-${k.id}`);
     await speichern('kredite', k);
     render();
-    document.getElementById(`kredit-${k.id}`)?.scrollIntoView({ block: 'center' });
+    einstZeigen('kredite', `kredit-${k.id}`);
     toast(`Letzte Rate: ${monatName(k.ende)} ✓`);
     return;
   }
@@ -3838,7 +4001,10 @@ window.addEventListener('popstate', () => formSchliessen(true));
 // Tippen in Suchfeld / Schieben am Regler → sofort aktualisieren (ohne die ganze Seite neu zu zeichnen)
 document.addEventListener('input', (ev) => {
   const el = ev.target;
-  if (el.id === 'such-feld') {
+  if (el.id === 'einst-such-feld') {
+    einstSuche = el.value;
+    einstFiltern();
+  } else if (el.id === 'such-feld') {
     suchText = el.value;
     document.getElementById('buchungsliste').innerHTML = htmlBuchungsliste();
   } else if (el.id === 'ww-regler') {

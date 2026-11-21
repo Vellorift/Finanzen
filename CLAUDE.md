@@ -6,7 +6,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 - **App:** https://vellorift.github.io/finanzen/
 - **Code:** GitHub-Repository `Vellorift/finanzen` (öffentlich, Branch `main`, GitHub Pages aus `/ (root)`)
 - **Abgleich-Daten:** privates Repository `Vellorift/finanzen-daten`, dort nur die verschlüsselte Datei `daten.json`
-- **Aktuelle Version:** 2.2.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
+- **Aktuelle Version:** 2.3.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
 
 ## Wer ist der Nutzer / wie arbeiten wir
 
@@ -50,7 +50,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 4d. Wünsche & Traum-Projekte (`wunschGesamt/Gespart/Rest()`, `wunschPlan()` = Ampel + „ab wann“ für alle Wünsche der Reihe nach, Gedanken-Pause, Arbeitsstunden)
 4e. Ziele für die Karten oben (`alleZiele()`, `zielTempo()`, `zielPrognose()`, Meilensteine + Konfetti)
 4f. Analyse (`analyse(n)`), Schnell-Favoriten (`favoriten()`), Abos (`abos()`)
-5. Ansichten (`render()`, Navigation `NAV`, Übersicht mit Ziel-Karussell + Hero-Karte, Buchungen mit Suche, Wünsche, Einstellungen)
+5. Ansichten (`render()`, Navigation `NAV`, Übersicht mit Ziel-Karussell + Hero-Karte, Buchungen mit Suche, Wünsche, Einstellungen). Einstellungen: `htmlEinstellungen()` liefert normale Karten, `einstAufbauen()` macht daraus aufklappbare Bereiche (Gruppen „Geld & Ziele“ / „App“, Liste `EINST_BEREICHE` mit Kurztext + Suchwörtern, offene Bereiche in `einstOffen`), Lupe oben (`#einst-such-knopf`) → `einstFiltern()`, `einstZeigen(bereich, id)` klappt auf und scrollt hin
 5a. Ausblick (`prognose()`, 12/24/36 Monate) · 5b. Auswertung = Analyse · Ausblick · Abos · 5c. Wünsche
 6. Formulare als **Bottom Sheet** (`sheetOeffnen()` / `formSchliessen()`): Buchung (eigener Kalender), 6b Wunsch/Projekt + Details (Spartopf, Sparrate, Teile, Gekauft), 6c Kredit bearbeiten, Ziel-Details
 7. Backup (JSON-Export, Teilen als `.txt`, weil Android-Chrome `.json` beim Teilen ablehnt, Wiederherstellen, **CSV-Export** für Excel)
@@ -60,7 +60,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 8. Bedienung (ein zentraler Klick-Empfänger über `data-action` / `data-view`, `change`- und `input`-Empfänger, Wischgesten) und `start()`
 
 ### Bedienung (seit 2.0)
-- Navigation unten: Übersicht · Buchungen · **(+)** · Auswertung · Wünsche. Einstellungen = ⚙ oben rechts.
+- Navigation unten: Übersicht · Buchungen · **(+)** · Auswertung · Wünsche. Einstellungen = ⚙ oben rechts, dort zusätzlich 🔍 zum Durchsuchen.
 - Übersicht: ganz oben die Ziel-Karten (Wünsche mit ⭐ + Notgroschen als Basis), wischbar, drehen alle 6 s weiter. Antippen → Details.
 - Wischen: Buchung nach links = löschen (mit Rückgängig), sonst links/rechts = Monat wechseln.
 
@@ -99,7 +99,7 @@ Neue Tabellen nur über eine höhere `DB_VERSION` anlegen. Neue Felder brauchen 
 
 - Lokal mit `python3 -m http.server` ausliefern und mit Playwright + Chrome headless in Handy-Größe (390×844, `locale='de-DE'`) durchklicken. Auf Fehlermeldungen achten (`pageerror`) und Screenshots ansehen.
 - Abgleich testen: GitHub-API per `context.route('https://api.github.com/**', …)` nachbauen und zwei getrennte Browser-Kontexte als „Handy“ und „PC“ verwenden. Prüfen: verschlüsselt, falsches Passwort wird erkannt, keine doppelten Kategorien, Löschungen kommen an, gleichzeitige Änderungen gehen nicht verloren.
-- Achtung: `[data-view=einstellungen]` gibt es mehrfach (⚙ oben = `#einst-knopf`, Statuspunkt). In Tests `nav [data-view=…]` bzw. `#einst-knopf` verwenden.
+- Achtung: `[data-view=einstellungen]` gibt es mehrfach (⚙ oben = `#einst-knopf`, Statuspunkt). In Tests `nav [data-view=…]` bzw. `#einst-knopf` verwenden. Einstellungs-Bereiche sind zugeklappt → vorher `.bereich-kopf[data-bereich=…]` antippen.
 - Start-Bildschirm überdeckt beim ersten Öffnen des Tages alles → in Tests `#startscreen` wegtippen. Wischgesten per CDP `Input.dispatchTouchEvent`, App-Sperre per CDP `WebAuthn.addVirtualAuthenticator` testen.
 - Screenshot-Import testen: Datei-Auswahl per `page.expect_file_chooser()` (der Knopf erzeugt ein `<input type=file>`), Bilder des Nutzers (Raiffeisen, dunkles Design). Teilen nachspielen: `fetch('teilen', {method:'POST', body: FormData mit 'bilder'})` bei aktivem Service Worker, dann `./?geteilt=1` öffnen.
 - Update von einer älteren Version testen: alte Dateien ausliefern, Daten anlegen, dann neue Dateien in denselben Ordner kopieren (gleicher Port = gleiche Datenbank).
@@ -126,6 +126,7 @@ Neue Tabellen nur über eine höhere `DB_VERSION` anlegen. Neue Felder brauchen 
 - **2.1** Screenshot-Import (Idee B): Screenshot der Banking-App (Raiffeisen: Umsatzliste oder Umsatzdetails) → Texterkennung mit Tesseract direkt auf dem Gerät → Vorschau mit Haken, Datum/Betrag/Notiz/Kategorie änderbar → übernehmen (mit Rückgängig). Erkennt Duplikate, merkt sich Kategorien, PayPal-/Klarna-Händler aus dem Verwendungszweck. Auch über „Teilen → Finanzen“ (Share Target) und als eingefügter Text. Knöpfe: Buchungen → „Screenshot importieren“ und im Formular „Neue Buchung“
 - **2.1.1** Screenshot-Knopf passt jetzt ins Design: als Symbol-Knopf (Bild) neben Suche/Filter in Buchungen und oben rechts neben dem ✕ im Formular „Neue Buchung“ (`sheetKopf(titel, extra)`)
 - **2.2** Screenshot-Import erkennt auch Zahlungs-Benachrichtigungen (z. B. easybank „Zahlung erfolgreich – 3,87 EUR bei REWE …“), mehrere auf einem Bild, „von …“ = Einnahme
+- **2.3** Einstellungen aufgeräumt: jeder Bereich ist eine zugeklappte Zeile (Symbol, Überschrift, Kurzbeschreibung), Antippen klappt auf. Gruppen „Geld & Ziele“ und „App“. Lupe oben rechts durchsucht alle Einstellungen (Überschriften, Suchwörter wie „Fingerabdruck“ oder „Notgroschen“, Feldnamen und Einträge wie „Miete“)
 
 ## Fahrplan / offene Punkte
 
