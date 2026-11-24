@@ -233,6 +233,22 @@
   .imp-text-box summary { cursor:pointer; padding:6px 0; }
   .imp-dreh { display:inline-block; width:12px; height:12px; border:2px solid var(--blau); border-right-color:transparent; border-radius:50%; animation:drehen .8s linear infinite; vertical-align:-1px; }
   @keyframes drehen { to { transform:rotate(360deg); } }
+  .text-knopf { display:block; width:100%; margin-top:10px; padding:10px; border:0; background:none; color:var(--grau); font-size:.85rem; }
+  .text-knopf .ic { width:14px; height:14px; vertical-align:-2px; }
+  /* Format beibringen */
+  .lern-segment { grid-template-columns:repeat(5,1fr); margin-bottom:10px; }
+  .lern-segment button { padding:9px 2px; font-size:.78rem; }
+  .lern-segment button.an.lern-betrag { color:var(--rot); } .lern-segment button.an.lern-name { color:var(--akzent); }
+  .lern-segment button.an.lern-datum { color:var(--blau); } .lern-segment button.an.lern-zweck { color:var(--gruen); }
+  .lern-liste { display:flex; flex-direction:column; gap:6px; max-height:46vh; overflow:auto; padding:2px; }
+  .lern-zeile { text-align:left; border:1px solid var(--rand2); background:var(--karte); color:var(--text); border-radius:12px; padding:9px 11px; font-size:.85rem; line-height:1.35; word-break:break-word; }
+  .lern-zeile.lern-betrag { border-color:var(--rot); } .lern-zeile.lern-name { border-color:var(--akzent); }
+  .lern-zeile.lern-datum { border-color:var(--blau); } .lern-zeile.lern-zweck { border-color:var(--gruen); }
+  .lern-zeile.lern-ignorieren { opacity:.4; text-decoration:line-through; }
+  .lern-tag { display:inline-block; font-size:.68rem; font-weight:700; padding:1px 7px; border-radius:8px; margin-right:6px; background:var(--karte3); vertical-align:1px; }
+  .lern-tag.lern-betrag { color:var(--rot); } .lern-tag.lern-name { color:var(--akzent); } .lern-tag.lern-datum { color:var(--blau); }
+  .lern-tag.lern-zweck { color:var(--gruen); } .lern-tag.lern-ignorieren { color:var(--grau); }
+  .lern-format { padding:8px 0; border-bottom:1px solid var(--rand); }
   .tagwahl .tag-eingabe { width:80px; flex:none; }
   .erweitert { background:var(--karte2); border-radius:14px; padding:10px 12px; margin-bottom:12px; }
   .erweitert summary { cursor:pointer; color:var(--akzent); font-weight:600; }

@@ -24,7 +24,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -305,7 +305,10 @@ const STANDARD_EINST = {
   rueckblickGesehen: null, // Monat, dessen Rückblick weggetippt wurde
   meilensteine: {},        // { zielId: 50 } → höchster schon gefeierter Meilenstein
   // --- neu in 2.1 ---
-  importKategorien: {},    // Screenshot-Import: { "riot games": kategorieId } → gleiche Kategorie wieder vorschlagen
+  importKategorien: {},
+  // --- neu in 2.4 ---
+  importFormate: [],       // in der App beigebrachte Screenshot-Formate (siehe impMitFormat)
+  importNamen: {},         // korrigierte Namen: { "lott (paypal)": "Lotto (PayPal)" }    // Screenshot-Import: { "riot games": kategorieId } → gleiche Kategorie wieder vorschlagen
 };
 
 async function startdatenAnlegen() {
@@ -1866,6 +1869,8 @@ function htmlEinstellungen() {
     <label class="feld"><span>Als „klein“ zählt alles bis (€)</span>${euroFeld('kleinGrenze', e.kleinGrenze)}</label>
   </section>
 
+  ${htmlImportEinst()}
+
   ${htmlSync()}
 
   ${htmlSperreEinst()}
@@ -1897,6 +1902,7 @@ const EINST_BEREICHE = [
   ['wuensche', 'Wünsche', 'Geld & Ziele', 'Ampel, Stundenlohn, Gedanken-Pause', 'wunsch ampel girokonto stundenlohn pause spaß'],
   ['klein', 'Kleine', 'Geld & Ziele', 'Grenze für kleine Ausgaben', 'klein kleinkram grenze'],
   ['darstellung', 'Darstellung', 'App', 'Akzentfarbe, AMOLED, Start-Bildschirm', 'farbe design akzent amoled schwarz dunkel start bildschirm'],
+  ['screenshot', 'Screenshot-Import', 'App', 'Eigene Formate, gelernte Namen', 'screenshot import format bild erkennung texterkennung ocr lernen namen beibringen'],
   ['abgleich', 'Abgleich', 'App', 'Daten zwischen Handy und PC', 'sync github synchronisieren handy pc passwort token verschlüsselt'],
   ['sperre', 'App-Sperre', 'App', 'Fingerabdruck beim Öffnen', 'sperre fingerabdruck entsperren schutz sicherheit pin'],
   ['backup', 'Backup', 'App', 'Sichern, wiederherstellen, CSV', 'backup sichern export wiederherstellen csv excel teilen datei'],
@@ -3009,6 +3015,7 @@ async function bildAufbereiten(datei) {
   g.drawImage(bmp, 0, 0, c.width, c.height);
   bmp.close?.();
   const bild = g.getImageData(0, 0, c.width, c.height), p = bild.data;
+  const orig = new Uint8ClampedArray(p); // Originalfarben (für rot/grün bei Beträgen)
   let summe = 0, anzahl = 0;
   for (let i = 0; i < p.length; i += 40) { summe += p[i] + p[i + 1] + p[i + 2]; anzahl++; }
   const dunkel = summe / anzahl / 3 < 128;
@@ -3021,27 +3028,56 @@ async function bildAufbereiten(datei) {
   }
   g.putImageData(bild, 0, 0);
   const blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
-  return { png: new Uint8Array(await blob.arrayBuffer()), breite: c.width };
+  // Farbe der Schrift in einem Rechteck: 'rot', 'gruen' oder null
+  const W = c.width, H = c.height;
+  const farbeVon = (x0, y0, w, h) => {
+    const ecke = (Math.max(0, y0 - 3) * W + Math.max(0, x0 - 3)) * 4; // Hintergrund neben dem Text
+    let n = 0, r = 0, gr = 0, b = 0;
+    for (let y = Math.max(0, y0); y < Math.min(H, y0 + h); y += 2) {
+      for (let x = Math.max(0, x0); x < Math.min(W, x0 + w); x += 2) {
+        const i = (y * W + x) * 4;
+        if (Math.abs(orig[i] - orig[ecke]) + Math.abs(orig[i + 1] - orig[ecke + 1]) + Math.abs(orig[i + 2] - orig[ecke + 2]) > 120) {
+          n++; r += orig[i]; gr += orig[i + 1]; b += orig[i + 2];
+        }
+      }
+    }
+    if (n < 5) return null;
+    r /= n; gr /= n; b /= n;
+    if (r > gr + 50 && r > b + 30) return 'rot';
+    if (gr > r + 40 && gr > b + 10) return 'gruen';
+    return null;
+  };
+  return { png: new Uint8Array(await blob.arrayBuffer()), breite: c.width, farbeVon };
 }
 
 // Ergebnis der Texterkennung (TSV = ein Wort pro Zeile mit Position) → Textzeilen
-function tsvZeilen(tsv, breite) {
+function tsvZeilen(tsv, breite, farbeVon) {
   const zeilen = new Map();
   for (const z of tsv.split('\n')) {
     const s = z.split('\t');
     if (s[0] !== '5' || !s[11]?.trim()) continue; // 5 = Wort
     const schluessel = `${s[2]}-${s[3]}-${s[4]}`;   // Block-Absatz-Zeile
     if (!zeilen.has(schluessel)) zeilen.set(schluessel, []);
-    zeilen.get(schluessel).push({ t: s[11].trim(), x: +s[6], r: +s[6] + +s[8], y: +s[7] });
+    zeilen.get(schluessel).push({ t: s[11].trim(), x: +s[6], r: +s[6] + +s[8], y: +s[7], h: +s[9] });
   }
   return [...zeilen.values()]
-    .map((w) => ({ woerter: w, breite, y: Math.min(...w.map((x) => x.y)), text: w.map((x) => x.t).join(' ') }))
+    .map((w) => {
+      const z = { woerter: w, breite, y: Math.min(...w.map((x) => x.y)), text: w.map((x) => x.t).join(' ') };
+      // Farbe des Betrags (rot = Ausgabe, grün = Einnahme) aus dem Originalbild
+      const bw = w.filter((x) => /\d[,.]\s?\d{2}\b|^(EUR|€)$|^[-–—−+]$/.test(x.t));
+      if (farbeVon && bw.length && IMP_BETRAG.test(z.text)) {
+        const x0 = Math.min(...bw.map((x) => x.x)), x1 = Math.max(...bw.map((x) => x.r));
+        const y0 = Math.min(...bw.map((x) => x.y)), y1 = Math.max(...bw.map((x) => x.y + x.h));
+        z.farbe = farbeVon(x0, y0, x1 - x0, y1 - y0);
+      }
+      return z;
+    })
     .sort((a, b) => a.y - b.y);
 }
 
 // --- Text auslesen ---
 // Betrag "-1.234,56 EUR". Die Texterkennung liest das Komma manchmal als "," oder ".", darum beides erlaubt
-const IMP_BETRAG = /([-–—−]?)\s?(\d{1,3}(?:\.\d{3})*)\s?[,.]{1,2}\s?(\d{2})\s*(?:EUR|€)/;
+const IMP_BETRAG = /([-–—−+]?)\s?(\d{1,3}(?:\.\d{3})*)\s?[,.]{1,2}\s?(\d{2})\s*(?:EUR|€)/;
 const impCent = (m) => Number(m[2].replace(/\D/g, '')) * 100 + Number(m[3]);
 const IMP_DATUM = /(\d{1,2})\.(\d{1,2})\.(\d{4})/;
 const IMP_DATUM_LANG = /(\d{1,2})\.?\s*(Januar|Februar|M[äa]rz|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s+(\d{4})/i;
@@ -3085,7 +3121,10 @@ const impSauber = (t) => t.replace(/\s*(\.{2,}|…)\s*$/, '').replace(/\s+/g, ' 
 // Texterkennung als Buchstabensalat liest ("pP", "K.", "S") → weglassen
 function impNameVorBetrag(z) {
   let woerter = z.woerter ? [...z.woerter] : null;
-  if (woerter && z.breite) while (woerter.length > 1 && woerter[0].r < z.breite * 0.2) woerter.shift();
+  // nur kurze Zeichen-Reste weglassen, keine echten Wörter (z. B. „REWE“ ohne Symbol davor)
+  if (woerter && z.breite) {
+    while (woerter.length > 1 && woerter[0].r < z.breite * 0.2 && (woerter[0].t.length <= 2 || !/[a-zäöüß]{2}/i.test(woerter[0].t))) woerter.shift();
+  }
   let t = woerter ? woerter.map((w) => w.t).join(' ') : z.text;
   const m = t.match(IMP_BETRAG);
   t = (m ? t.slice(0, m.index) : t).replace(IMP_DATUM, '');
@@ -3107,14 +3146,179 @@ function impBezeichnung(name, zweck) {
 function impBuchung(name, zweck, mBetrag, datum) {
   const cent = impCent(mBetrag);
   if (!cent || !datum) return null;
-  return { datum, betrag: cent, art: mBetrag[1] ? 'ausgabe' : 'einnahme',
+  return { datum, betrag: cent, art: /[-–—−]/.test(mBetrag[1]) ? 'ausgabe' : 'einnahme',
     notiz: impBezeichnung(name, zweck), roh: `${name} ${zweck || ''}` };
 }
 
-// zeilen = [{ text, woerter?, breite? }] → erkannte Buchungen
+// --- Allgemeine Erkennung (seit 2.4) ---
+// Funktioniert ohne feste Regeln für eine bestimmte App: jeder Betrag mit „EUR“/„€“ wird
+// eine Buchung. Name = Text davor (oder Zeile darüber), Datum = in der Zeile, sonst die
+// letzte Datums-Überschrift darüber, sonst Statusleiste/heute. Kontostände werden übersprungen.
+const IMP_IGNORIEREN = /kontostand|saldo|verfügbar|guthaben|summe|gesamt|limit|dispo|kreditrahmen|depotwert|wert des depots|ausgaben im|einnahmen im/i;
+const MON_KURZ = ['jan', 'feb', 'mar', 'apr', 'mai', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dez'];
+
+// Datum ohne Jahr: dieses Jahr, außer es läge in der Zukunft (dann letztes Jahr)
+function impOhneJahr(tag, monatIdx) {
+  const h = new Date();
+  const d = new Date(h.getFullYear(), monatIdx, tag);
+  if (d > h) d.setFullYear(h.getFullYear() - 1);
+  return datumText(d);
+}
+// Datum in einer Zeile finden – alle gängigen Schreibweisen
+function impDatumFlex(text) {
+  const voll = impDatum(text);
+  if (voll) return voll;
+  let m = text.match(/\b(\d{1,2})\.\s?(Jan|Feb|M[äa]r|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)[a-zä]*\.?(?:\s+(\d{4}))?/i);
+  if (m) {
+    const mi = MON_KURZ.indexOf(m[2].slice(0, 3).toLowerCase().replace('ä', 'a'));
+    return m[3] ? impDatumAus(m[3], mi + 1, m[1]) : impOhneJahr(Number(m[1]), mi);
+  }
+  m = text.match(/(?:^|\s)(\d{1,2})\.(\d{1,2})\.(\d{2})(?![\d,.])/);
+  if (m) return impDatumAus('20' + m[3], m[2], m[1]);
+  m = text.match(/(?:^|\s)(\d{1,2})\.(\d{1,2})\.(?![\d,])/);
+  if (m && Number(m[2]) >= 1 && Number(m[2]) <= 12) return impOhneJahr(Number(m[1]), Number(m[2]) - 1);
+  if (/^\W*heute\b/i.test(text.trim())) return heute();
+  if (/^\W*gestern\b/i.test(text.trim())) { const d = new Date(); d.setDate(d.getDate() - 1); return datumText(d); }
+  return null;
+}
+// Ist die Zeile nur eine Datums-Überschrift (evtl. mit Tagessumme/Kontostand daneben)?
+const IMP_DATUMSWOERTER = /\b(heute|gestern|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag|mo|di|mi|do|fr|sa|so|jan\w*|feb\w*|m[äa]r\w*|apr\w*|mai|jun\w*|jul\w*|aug\w*|sep\w*|okt\w*|nov\w*|dez\w*)\b\.?/gi;
+function impUeberschrift(t) {
+  const d = impDatumFlex(t);
+  if (!d) return null;
+  const rest = t.replace(IMP_BETRAG, '').replace(IMP_DATUM, '').replace(IMP_DATUMSWOERTER, '');
+  return impBuchstaben(rest) < 3 ? d : null;
+}
+// Ausgabe oder Einnahme? Vorzeichen → Farbe (rot/grün) → Stichwörter → sonst Ausgabe
+function impArt(mB, farbe, text) {
+  if (/[-–—−]/.test(mB[1])) return 'ausgabe';
+  if (mB[1] === '+') return 'einnahme';
+  if (farbe === 'rot') return 'ausgabe';
+  if (farbe === 'gruen') return 'einnahme';
+  if (/gutschrift|eingang|erhalten|gehalt|lohn|von\s+\S|rückzahlung|erstattung|dividende|zinsgutschrift/i.test(text)) return 'einnahme';
+  return 'ausgabe';
+}
+// Text einer Zeile ohne Betrag und ohne Datum (für Name/Zweck aus einer anderen Zeile)
+const impNurText = (t) => impSauber((t || '').replace(IMP_BETRAG, '').replace(IMP_DATUM, ''));
+
+// Reihenfolge der Tage prüfen (Listen sind nach Datum sortiert) → verdächtige markieren
+function impReihenfolgePruefen(ergebnis) {
+  const koepfe = [...new Set(ergebnis.map((b) => b.tagKopf).filter(Boolean))];
+  const absteigend = koepfe.length > 1 && koepfe[0] >= koepfe[koepfe.length - 1];
+  koepfe.forEach((k, j) => {
+    const zuNeu = j > 0 && (absteigend ? k > koepfe[j - 1] : k < koepfe[j - 1]);
+    const zuAlt = j < koepfe.length - 1 && (absteigend ? k < koepfe[j + 1] : k > koepfe[j + 1]);
+    if (zuNeu || zuAlt) ergebnis.filter((b) => b.tagKopf === k).forEach((b) => { b.hinweis = 'Datum bitte prüfen – passt nicht zur Reihenfolge'; });
+  });
+  ergebnis.forEach((b) => delete b.tagKopf);
+  return ergebnis;
+}
+
+// Datum, wenn beim Betrag keins steht: Statusleiste oben („Fr., 20. Nov.“), sonst heute
+function impStatusDatum(zeilen) {
+  const oben = zeilen.slice(0, 3).map((z) => z.text).join(' ');
+  const m = oben.match(/\b(\d{1,2})\.\s?(Jan|Feb|M[äa]r|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)[a-zä]*\.?(?!\s*\d{4})/i);
+  return m ? { datum: impOhneJahr(Number(m[1]), MON_KURZ.indexOf(m[2].slice(0, 3).toLowerCase().replace('ä', 'a'))), sicher: true }
+    : { datum: heute(), sicher: false };
+}
+// Datum in den 1–2 Zeilen unter dem Betrag (z. B. „Kartenzahlung · 23.11.2026“), bis zum nächsten Betrag
+function impDatumDarunter(zeilen, i) {
+  for (let k = i + 1; k <= i + 2 && k < zeilen.length; k++) {
+    if (IMP_BETRAG.test(zeilen[k].text)) return null;
+    const d = impDatumFlex(zeilen[k].text);
+    if (d) return d;
+  }
+  return null;
+}
+
+function impAllgemein(zeilen, alles) {
+  const ergebnis = [];
+  const ersatz = impStatusDatum(zeilen);
+  let tag = null;
+  const taugtAlsName = (t) => t && !IMP_BETRAG.test(t) && !impDatumFlex(t) && !IMP_IGNORIEREN.test(t) && impBuchstaben(t) >= 2;
+  for (let i = 0; i < zeilen.length; i++) {
+    const z = zeilen[i], t = z.text.trim();
+    const kopf = impUeberschrift(t);
+    if (kopf) { tag = kopf; continue; }
+    const mB = t.match(IMP_BETRAG);
+    if (!mB || IMP_IGNORIEREN.test(t)) continue;
+    let name = impNameVorBetrag(z);
+    if (impBuchstaben(name) < 2 && taugtAlsName(zeilen[i - 1]?.text)) name = impSauber(zeilen[i - 1].text);
+    else if (impBuchstaben(name) < 2 && taugtAlsName(zeilen[i + 1]?.text)) name = impSauber(zeilen[i + 1].text);
+    if (impBuchstaben(name) < 2) continue;
+    const naechste = zeilen[i + 1]?.text || '';
+    const zweck = taugtAlsName(naechste) && impSauber(naechste) !== name ? naechste : '';
+    const cent = impCent(mB);
+    if (!cent) continue;
+    // Datum: in der Zeile → Überschrift darüber → Zeile darunter → Statusleiste/heute
+    const eigenes = impDatumFlex(t) || (!tag && impDatumDarunter(zeilen, i));
+    ergebnis.push({ datum: eigenes || tag || ersatz.datum, betrag: cent, art: impArt(mB, z.farbe, `${t} ${zweck}`),
+      notiz: impBezeichnung(name.slice(0, 80), zweck), roh: `${name} ${zweck}`, tagKopf: eigenes ? null : tag,
+      hinweis: eigenes || tag || ersatz.sicher ? null : 'Kein Datum gefunden – heute angenommen' });
+  }
+  return impReihenfolgePruefen(ergebnis);
+}
+
+// --- Eigene Formate (in der App beigebracht) ---
+// Format = { id, name, woerter: [...], nameOffset, zweckOffset, datum: 'auto'|'ueberschrift'|Zahl, ignorieren: [...],
+//            ignorierDatumZeilen, ignorierOhneText, art: 'auto'|'ausgabe'|'einnahme' }
+// Offsets zählen Zeilen relativ zur Betrag-Zeile (−1 = darüber, 0 = gleiche Zeile, 1 = darunter).
+const impNorm = (t) => (t || '').toLowerCase().replace(/[^a-zäöüß ]/g, ' ').replace(/\s+/g, ' ').trim();
+
+function impFormatFinden(alles) {
+  const text = impNorm(alles);
+  let bestes = null, punkte = 0;
+  for (const f of daten.einst.importFormate || []) {
+    const treffer = f.woerter.filter((w) => text.includes(w)).length;
+    const noetig = Math.max(1, Math.ceil(f.woerter.length * 0.6));
+    if (treffer >= noetig && treffer > punkte) { bestes = f; punkte = treffer; }
+  }
+  return bestes;
+}
+
+function impMitFormat(f, zeilen) {
+  const ergebnis = [];
+  const ersatz = impStatusDatum(zeilen);
+  let tag = null;
+  const ignoriert = (t) => f.ignorieren.some((w) => impNorm(t).includes(w))
+    || (f.ignorierDatumZeilen && impDatumFlex(t)) || (f.ignorierOhneText && impBuchstaben(t.replace(IMP_BETRAG, '')) < 2);
+  for (let i = 0; i < zeilen.length; i++) {
+    const z = zeilen[i], t = z.text.trim();
+    const mB = t.match(IMP_BETRAG);
+    if (!mB || ignoriert(t)) {
+      const kopf = impUeberschrift(t);
+      if (kopf) tag = kopf;
+      continue;
+    }
+    const name = f.nameOffset === 0 ? impNameVorBetrag(z) : impNurText(zeilen[i + f.nameOffset]?.text);
+    if (impBuchstaben(name) < 2) continue;
+    const zweck = f.zweckOffset != null ? impNurText(zeilen[i + f.zweckOffset]?.text) : '';
+    let datum = null;
+    if (typeof f.datum === 'number') datum = impDatumFlex(zeilen[i + f.datum]?.text || '');
+    if (!datum && f.datum !== 'ueberschrift') datum = impDatumFlex(t);
+    const cent = impCent(mB);
+    if (!cent) continue;
+    ergebnis.push({ datum: datum || tag || ersatz.datum, betrag: cent,
+      art: f.art === 'auto' ? impArt(mB, z.farbe, `${t} ${zweck}`) : f.art,
+      notiz: impBezeichnung(name.slice(0, 80), zweck), roh: `${name} ${zweck}`, tagKopf: datum ? null : tag,
+      hinweis: datum || tag || ersatz.sicher ? null : 'Kein Datum gefunden – heute angenommen' });
+  }
+  return impReihenfolgePruefen(ergebnis);
+}
+
+// zeilen = [{ text, woerter?, breite?, farbe? }] → erkannte Buchungen.
+// Das Ergebnis hat zusätzlich .methode (welche Erkennung gegriffen hat).
 function importParsen(zeilen) {
   zeilen = zeilen.filter((z) => z.text && z.text.trim());
   const alles = zeilen.map((z) => z.text).join('\n');
+  const mit = (liste, methode) => Object.assign(liste, { methode });
+
+  // 0) Eigenes, in der App beigebrachtes Format hat Vorrang
+  const format = impFormatFinden(alles);
+  if (format) {
+    const r = impMitFormat(format, zeilen);
+    if (r.length) return mit(r, 'Format „' + format.name + '“');
+  }
 
   // a) Benachrichtigung (z. B. easybank): „Zahlung erfolgreich – 3,87 EUR bei REWE …“
   //    „bei“/„an“ = Ausgabe, „von“ = Geld bekommen. Datum aus der Statusleiste („Fr., 20. Nov.“), sonst heute.
@@ -3135,7 +3339,7 @@ function importParsen(zeilen) {
         benachr.push({ datum, betrag: cent, art: /von/i.test(m[3]) ? 'einnahme' : 'ausgabe', notiz: name, roh: z.text });
       }
     });
-    if (benachr.length) return benachr;
+    if (benachr.length) return mit(benachr, 'Benachrichtigung');
   }
 
   // b) Detailansicht: ein großer Betrag, darüber der Name, darunter das Datum
@@ -3144,7 +3348,7 @@ function importParsen(zeilen) {
       const m = z.text.match(IMP_BETRAG);
       return m && impBuchstaben(z.text.replace(m[0], '')) < 3;
     });
-    if (iB < 0) return [];
+    if (iB >= 0) {
     const mB = zeilen[iB].text.match(IMP_BETRAG);
     let datum = null;
     for (let i = iB; i < zeilen.length && !datum; i++) datum = impDatum(zeilen[i].text);
@@ -3162,46 +3366,12 @@ function importParsen(zeilen) {
       }
     }
     const b = impBuchung(name, zweck.join(' '), mB, datum);
-    return b ? [b] : [];
+    if (b) return mit([b], 'Umsatzdetails');
+    }
   }
 
-  // c) Umsatzliste: Tagesüberschrift "29.09.2026  2.365,05 EUR" (= Kontostand, nicht buchen),
-  //    darunter Zeilen "Name  -3,00 EUR" und darunter der Verwendungszweck
-  const ergebnis = [];
-  let tag = null;
-  const istUeberschrift = (t) => {
-    const d = impDatum(t);
-    return d && t.search(IMP_DATUM) <= 1 && impBuchstaben(t.replace(IMP_DATUM, '').replace(IMP_BETRAG, '')) < 3 ? d : null;
-  };
-  for (let i = 0; i < zeilen.length; i++) {
-    const t = zeilen[i].text.trim();
-    const kopf = istUeberschrift(t);
-    if (kopf) { tag = kopf; continue; }
-    const mB = t.match(IMP_BETRAG);
-    if (!mB) continue;
-    let name = impNameVorBetrag(zeilen[i]);
-    // Name nicht in derselben Zeile erkannt → Zeile darüber nehmen
-    const davor = zeilen[i - 1]?.text || '';
-    if (impBuchstaben(name) < 2 && !IMP_BETRAG.test(davor) && !impDatum(davor)) name = impSauber(davor);
-    if (impBuchstaben(name) < 2) continue;
-    const naechste = zeilen[i + 1]?.text || '';
-    const zweck = !IMP_BETRAG.test(naechste) && !impDatum(naechste) ? naechste : '';
-    const b = impBuchung(name, zweck, mB, impDatum(t) || tag);
-    if (!b) continue;
-    // Die Liste ist nach Datum sortiert (neueste oben) – passt die Reihenfolge nicht,
-    // hat sich die Texterkennung wohl bei einer Ziffer vertan → zum Prüfen markieren
-    b.tagKopf = tag;
-    ergebnis.push(b);
-  }
-  const koepfe = [...new Set(ergebnis.map((b) => b.tagKopf))];
-  const absteigend = koepfe.length > 1 && koepfe[0] >= koepfe[koepfe.length - 1];
-  koepfe.forEach((k, j) => {
-    const zuNeu = j > 0 && (absteigend ? k > koepfe[j - 1] : k < koepfe[j - 1]);
-    const zuAlt = j < koepfe.length - 1 && (absteigend ? k < koepfe[j + 1] : k > koepfe[j + 1]);
-    if (zuNeu || zuAlt) ergebnis.filter((b) => b.tagKopf === k).forEach((b) => { b.pruefen = true; });
-  });
-  ergebnis.forEach((b) => delete b.tagKopf);
-  return ergebnis;
+  // d) alles andere: allgemeine Erkennung (funktioniert auch bei Raiffeisen-Umsatzlisten)
+  return mit(impAllgemein(zeilen, alles), 'allgemein');
 }
 
 // --- Kategorie vorschlagen ---
@@ -3263,24 +3433,38 @@ function importBildWaehlen() {
 
 async function importAuswerten(dateien, text) {
   if (!document.getElementById('imp-status')) importOeffnen();
-  let gefunden = [];
-  const rohTexte = [];
+  const quellen = [];   // pro Bild die erkannten Textzeilen (auch fürs „Format beibringen“)
   try {
     for (let i = 0; i < dateien.length; i++) {
       importStatus(dateien.length > 1 ? `Bild ${i + 1} von ${dateien.length} wird vorbereitet …` : 'Bild wird vorbereitet …');
-      const { png, breite } = await bildAufbereiten(dateien[i]);
-      const zeilen = tsvZeilen(await ocrLesen(png), breite);
-      rohTexte.push(zeilen.map((z) => z.text).join('\n'));
-      gefunden.push(...importParsen(zeilen).map((b) => ({ ...b, quelle: i })));
+      const { png, breite, farbeVon } = await bildAufbereiten(dateien[i]);
+      quellen.push({ nr: i, zeilen: tsvZeilen(await ocrLesen(png), breite, farbeVon) });
     }
-    if (text && text.trim()) {
-      rohTexte.push(text);
-      gefunden.push(...importParsen(text.split('\n').map((t) => ({ text: t }))).map((b) => ({ ...b, quelle: 'text' })));
-    }
+    if (text && text.trim()) quellen.push({ nr: 'text', zeilen: text.split('\n').map((t) => ({ text: t })) });
   } catch (err) {
     importStatus('');
     toast('Fehler bei der Texterkennung: ' + err.message);
     return;
+  }
+  imp = { quellen };
+  importAnzeigen();
+}
+
+// Erkannten Text auswerten und als Vorschau zeigen (auch nach „Format beibringen“ erneut)
+function importAnzeigen() {
+  let gefunden = [];
+  const methoden = new Set();
+  for (const q of imp.quellen) {
+    const r = importParsen(q.zeilen);
+    if (r.length) methoden.add(r.methode);
+    gefunden.push(...r.map((b) => ({ ...b, quelle: q.nr })));
+  }
+  // Aus Korrekturen gelernt: „Lott (PayPal)“ → „Lotto (PayPal)“
+  const namen = daten.einst.importNamen || {};
+  for (const b of gefunden) {
+    b.notizRoh = b.notiz;
+    const besser = namen[b.notiz.toLowerCase().trim()];
+    if (besser) b.notiz = besser;
   }
 
   // Doppelte zwischen mehreren Screenshots (z. B. überlappend gescrollt) nur einmal
@@ -3292,13 +3476,7 @@ async function importAuswerten(dateien, text) {
     return true;
   });
 
-  if (!gefunden.length) {
-    importStatus('');
-    const box = document.getElementById('imp-status');
-    if (box) box.innerHTML = `<span class="gelb">Keine Buchungen erkannt.</span> Am besten klappt es mit der Umsatzliste, den Umsatzdetails oder einer Zahlungs-Benachrichtigung.
-      <details style="margin-top:6px"><summary>Erkannter Text</summary><pre class="imp-roh">${esc(rohTexte.join('\n---\n'))}</pre></details>`;
-    return;
-  }
+  if (!gefunden.length) return importKeineTreffer();
 
   // Schon eingetragen? (gleiche Art + gleicher Betrag, Datum höchstens 3 Tage auseinander)
   const belegt = new Set();
@@ -3313,8 +3491,18 @@ async function importAuswerten(dateien, text) {
     b.an = !b.doppelt;
   }
   gefunden.sort((a, b) => b.datum.localeCompare(a.datum));
-  imp = { zeilen: gefunden };
+  imp.zeilen = gefunden;
+  imp.methoden = [...methoden];
   importVorschau();
+}
+
+function importKeineTreffer() {
+  if (!document.getElementById('imp-status')) importOeffnen();
+  const box = document.getElementById('imp-status');
+  const roh = imp.quellen.map((q) => q.zeilen.map((z) => z.text).join('\n')).join('\n---\n');
+  box.innerHTML = `<span class="gelb">Keine Buchungen erkannt.</span> Bring der App dieses Format bei – danach erkennt sie es automatisch.
+    ${imp.quellen.some((q) => q.zeilen.length) ? `<button class="knopf" data-action="lern-start" style="margin-top:8px">${icon('stift')} Format beibringen</button>` : ''}
+    <details style="margin-top:6px"><summary>Erkannter Text</summary><pre class="imp-roh">${esc(roh)}</pre></details>`;
 }
 
 function importVorschau() {
@@ -3326,7 +3514,8 @@ function importVorschau() {
   };
   const datumAnzeige = (d) => d.split('-').reverse().join('.');
   sheetOeffnen(`${sheetKopf('Erkannte Buchungen')}
-    <div class="klein grau" style="margin-bottom:12px">Bitte kurz prüfen. Alles ist änderbar. Nur Buchungen mit Haken werden gespeichert.</div>
+    <div class="klein grau" style="margin-bottom:12px">Bitte kurz prüfen. Alles ist änderbar. Nur Buchungen mit Haken werden gespeichert.
+      ${imp.methoden?.length ? `<br>Erkannt über: ${esc(imp.methoden.join(', '))}` : ''}</div>
     ${z.map((b, i) => `<div class="imp-zeile ${b.an ? '' : 'aus'}" id="imp-z-${i}">
       <div class="imp-kopf">
         <input type="checkbox" data-imp="an" data-i="${i}" ${b.an ? 'checked' : ''} aria-label="Übernehmen">
@@ -3340,10 +3529,11 @@ function importVorschau() {
         </div>
         <select data-imp="kat" data-i="${i}" aria-label="Kategorie">${katOptionen(b)}</select>
       </div>
-      ${b.pruefen ? '<div class="klein gelb" style="margin-top:6px">⚠ Datum bitte prüfen – passt nicht zur Reihenfolge</div>' : ''}
+      ${b.hinweis ? `<div class="klein gelb" style="margin-top:6px">⚠ ${esc(b.hinweis)}</div>` : ''}
       ${b.doppelt ? `<div class="klein gelb" style="margin-top:6px">⚠ Schon eingetragen? ${euro(b.doppelt.betrag)} am ${datumAnzeige(b.doppelt.datum)}${b.doppelt.notiz ? ` „${esc(b.doppelt.notiz)}“` : ''}</div>` : ''}
     </div>`).join('')}
-    <button class="knopf haupt" data-action="imp-speichern" id="imp-knopf"></button>`);
+    <button class="knopf haupt" data-action="imp-speichern" id="imp-knopf"></button>
+    ${imp.quellen?.some((q) => q.zeilen.length) ? `<button class="text-knopf" data-action="lern-start">Falsch erkannt? ${icon('stift')} Format beibringen</button>` : ''}`);
   importKnopf();
 }
 function importKnopf() {
@@ -3393,6 +3583,7 @@ async function importSpeichern() {
   if (falsch) return toast(`Bitte prüfen: „${falsch.notiz || 'ohne Namen'}“ (Datum, Betrag, Kategorie)`);
   const jetzt = Date.now();
   const merken = { ...(daten.einst.importKategorien || {}) };
+  const namen = { ...(daten.einst.importNamen || {}) };
   const neu = [];
   for (const [n, b] of auswahl.entries()) {
     const buchung = { id: neueId(), datum: b.datum, betrag: b.betrag, art: b.art, kategorieId: b.kategorieId,
@@ -3401,14 +3592,162 @@ async function importSpeichern() {
     neu.push(buchung);
     const s = impSchluessel(b.notiz);
     if (s) merken[s] = b.kategorieId; // nächstes Mal gleiche Kategorie vorschlagen
+    // Namen von Hand verbessert? Dann nächstes Mal gleich den richtigen Namen nehmen
+    const roh = (b.notizRoh || '').toLowerCase().trim();
+    if (roh && b.notiz.trim() && b.notiz.trim() !== b.notizRoh) namen[roh] = b.notiz.trim();
   }
   daten.einst.importKategorien = merken;
+  daten.einst.importNamen = namen;
   await einstSpeichern();
   imp = null;
   formSchliessen(); render(); vibrieren();
   toast(`${neu.length} Buchung${neu.length > 1 ? 'en' : ''} übernommen ✓`, 'Rückgängig', async () => {
     for (const b of neu) await loeschen('buchungen', b.id);
     render();
+  });
+}
+
+// --- Format beibringen (seit 2.4) ---
+// Erkannte Textzeilen werden antippbar: Betrag, Name, Datum, Zweck, Ignorieren.
+// Daraus entsteht ein Format (siehe impMitFormat), das in den Einstellungen gespeichert und mit abgeglichen wird.
+let lern = null;
+const LERN_ROLLEN = [['betrag', 'Betrag'], ['name', 'Name'], ['datum', 'Datum'], ['zweck', 'Zweck'], ['ignorieren', 'Ignorieren']];
+
+function lernStart() {
+  const q = imp.quellen.find((x) => x.zeilen.some((z) => IMP_BETRAG.test(z.text))) || imp.quellen.find((x) => x.zeilen.length);
+  lern = { zeilen: q.zeilen.filter((z) => z.text && z.text.trim()), modus: 'betrag',
+    betrag: null, name: null, datum: null, zweck: null, ignorieren: new Set(), woerter: new Set(), art: 'auto', formatName: '' };
+  sheetOeffnen(`${sheetKopf('Format beibringen')}
+    <div class="klein grau" style="margin-bottom:10px">Oben auswählen, was du markieren willst – dann die passende Zeile antippen.
+      Bei einer Liste reicht <b>eine</b> Buchung als Beispiel. Nicht markierte Zeilen werden nicht gebucht.</div>
+    <div id="lern-dyn"></div>
+    <label class="feld"><span>Ausgabe oder Einnahme</span><select id="lern-art">
+      <option value="auto">Automatisch (Minus, Farbe, Stichwörter)</option>
+      <option value="ausgabe">Immer Ausgabe</option><option value="einnahme">Immer Einnahme</option></select></label>
+    <label class="feld"><span>Name des Formats</span><input type="text" id="lern-name" placeholder="z. B. easybank Benachrichtigung"></label>
+    <button class="knopf haupt" data-action="lern-speichern">Format speichern & anwenden</button>
+    <button class="text-knopf" data-action="lern-zurueck">Abbrechen</button>`);
+  lernAktualisieren();
+}
+
+// Text, der auf solchen Screenshots immer zu sehen ist (ohne Zahlen, nicht Name/Zweck)
+function lernKandidaten() {
+  return lern.zeilen.map((z, i) => i).filter((i) => {
+    const t = lern.zeilen[i].text;
+    return !/\d/.test(t) && impBuchstaben(t) >= 4 && t.length <= 45 && impNorm(t).length >= 3
+      && ![lern.name, lern.zweck, lern.betrag].includes(i);
+  });
+}
+
+function lernAktualisieren() {
+  const box = document.getElementById('lern-dyn');
+  if (!box) return;
+  const rollen = (i) => LERN_ROLLEN.filter(([k]) => (k === 'ignorieren' ? lern.ignorieren.has(i) : lern[k] === i));
+  const kandidaten = lernKandidaten();
+  box.innerHTML = `<div class="segment lern-segment">${LERN_ROLLEN.map(([k, t]) =>
+      `<button class="${lern.modus === k ? 'an' : ''} lern-${k}" data-action="lern-modus" data-id="${k}">${t}</button>`).join('')}</div>
+    <div class="lern-liste">${lern.zeilen.map((z, i) => {
+      const r = rollen(i);
+      return `<button class="lern-zeile ${r.map(([k]) => 'lern-' + k).join(' ')}" data-action="lern-zeile" data-id="${i}">
+        ${r.map(([k, t]) => `<span class="lern-tag lern-${k}">${t}</span>`).join('')}${esc(z.text)}</button>`;
+    }).join('')}</div>
+    <div class="label" style="margin-top:14px">Woran erkennt die App dieses Format?</div>
+    <div class="klein grau" style="margin-bottom:6px">Text antippen, der auf solchen Screenshots immer zu sehen ist (am besten 2–3).</div>
+    <div class="chips">${kandidaten.map((i) => `<button class="chip ${lern.woerter.has(i) ? 'an' : ''}" data-action="lern-wort" data-id="${i}">${esc(lern.zeilen[i].text)}</button>`).join('')
+      || '<span class="klein grau">Kein passender Text gefunden</span>'}</div>`;
+}
+
+function lernZeile(i) {
+  const t = lern.zeilen[i].text;
+  const m = lern.modus;
+  if (m === 'ignorieren') {
+    if (lern.ignorieren.has(i)) lern.ignorieren.delete(i); else lern.ignorieren.add(i);
+  } else if (lern[m] === i) {
+    lern[m] = null;            // nochmal antippen = abwählen
+  } else {
+    if (m === 'betrag' && !IMP_BETRAG.test(t)) return toast('In dieser Zeile wurde kein Betrag mit EUR/€ erkannt');
+    if (m === 'datum' && !impDatumFlex(t)) return toast('In dieser Zeile wurde kein Datum erkannt');
+    lern[m] = i;
+    lern.ignorieren.delete(i);
+    // Nach dem Betrag gleich den Namen, danach das Datum markieren
+    if (m === 'betrag') {
+      lern.modus = 'name';
+      if (!lern.woerter.size) {  // Vorschlag zum Erkennen: Text nahe am Betrag
+        lernKandidaten().filter((k) => Math.abs(k - i) <= 3).sort((a, b) => Math.abs(a - i) - Math.abs(b - i))
+          .slice(0, 2).forEach((k) => lern.woerter.add(k));
+      }
+    } else if (m === 'name') lern.modus = 'datum';
+  }
+  [lern.name, lern.zweck].forEach((k) => lern.woerter.delete(k));
+  lernAktualisieren();
+}
+
+async function lernSpeichern() {
+  if (lern.betrag == null) { lern.modus = 'betrag'; lernAktualisieren(); return toast('Bitte zuerst die Zeile mit dem Betrag antippen'); }
+  const woerter = [...lern.woerter].map((i) => impNorm(lern.zeilen[i].text)).filter((w) => w.length >= 3);
+  if (!woerter.length) return toast('Bitte unten mindestens einen Text zum Erkennen antippen');
+  const zb = lern.zeilen[lern.betrag].text;
+  const off = (i) => (i == null ? null : i - lern.betrag);
+  let datum = 'auto';
+  if (lern.datum != null) {
+    datum = lern.datum < lern.betrag && impUeberschrift(lern.zeilen[lern.datum].text) ? 'ueberschrift' : off(lern.datum);
+  }
+  const ign = [...lern.ignorieren].map((i) => lern.zeilen[i].text);
+  const f = {
+    id: neueId(),
+    name: (document.getElementById('lern-name')?.value || '').trim() || lern.zeilen[[...lern.woerter][0]].text.slice(0, 30),
+    woerter,
+    nameOffset: lern.name == null ? 0 : off(lern.name),
+    zweckOffset: off(lern.zweck),
+    datum,
+    ignorieren: ign.map((t) => impNorm(t.replace(IMP_BETRAG, '').replace(IMP_DATUM, ''))).filter((w) => w.length >= 3),
+    // Beträge neben einem Datum (z. B. Kontostand in der Tages-Überschrift) bzw. ganz ohne Text weglassen –
+    // aber nur, wenn das Beispiel selbst nicht so aussieht
+    ignorierDatumZeilen: !impDatumFlex(zb) && ign.some((t) => impDatumFlex(t) && IMP_BETRAG.test(t)),
+    ignorierOhneText: impBuchstaben(zb.replace(IMP_BETRAG, '')) >= 2 && ign.some((t) => IMP_BETRAG.test(t) && impBuchstaben(t.replace(IMP_BETRAG, '')) < 2),
+    art: document.getElementById('lern-art')?.value || 'auto',
+    angelegt: Date.now(),
+  };
+  daten.einst.importFormate = [...(daten.einst.importFormate || []), f];
+  await einstSpeichern();
+  lern = null;
+  toast(`Format „${f.name}“ gespeichert ✓`);
+  importAnzeigen();
+}
+
+function lernZurueck() {
+  lern = null;
+  if (imp?.zeilen?.length) importVorschau(); else importKeineTreffer();
+}
+
+// Einstellungen → Screenshot-Import
+function htmlImportEinst() {
+  const formate = daten.einst.importFormate || [];
+  const n = Object.keys(daten.einst.importNamen || {}).length;
+  const k = Object.keys(daten.einst.importKategorien || {}).length;
+  return `<section class="karte"><h2>${icon('bild')} Screenshot-Import</h2>
+    <div class="klein grau" style="margin-bottom:10px">Die App erkennt die meisten Screenshots automatisch. Klappt es bei einem nicht,
+      tippe beim Import auf „Format beibringen“. Eigene Formate haben Vorrang.</div>
+    ${formate.length ? formate.map((f) => `<div class="zeile lern-format">
+        <span><b>${esc(f.name)}</b><br><span class="klein grau">erkennt: ${esc(f.woerter.join(' · '))}</span></span>
+        <button class="x" data-action="format-loeschen" data-id="${f.id}" aria-label="Format löschen">${icon('kreuz')}</button></div>`).join('')
+      : '<div class="klein grau">Noch keine eigenen Formate.</div>'}
+    <div class="klein grau" style="margin-top:12px">Gelernt aus deinen Korrekturen: ${n} Name${n === 1 ? '' : 'n'} · ${k} Kategorie${k === 1 ? '' : 'n'}</div>
+    ${n || k ? '<button class="knopf" data-action="import-gelerntes-loeschen" style="margin-top:8px">Gelerntes zurücksetzen</button>' : ''}
+  </section>`;
+}
+async function formatLoeschen(id) {
+  const vorher = daten.einst.importFormate || [];
+  daten.einst.importFormate = vorher.filter((f) => f.id !== id);
+  await einstSpeichern(); render();
+  toast('Format gelöscht', 'Rückgängig', async () => { daten.einst.importFormate = vorher; await einstSpeichern(); render(); });
+}
+async function gelerntesLoeschen() {
+  const namen = daten.einst.importNamen, kats = daten.einst.importKategorien;
+  daten.einst.importNamen = {}; daten.einst.importKategorien = {};
+  await einstSpeichern(); render();
+  toast('Gelerntes zurückgesetzt', 'Rückgängig', async () => {
+    daten.einst.importNamen = namen; daten.einst.importKategorien = kats; await einstSpeichern(); render();
   });
 }
 
@@ -3486,6 +3825,14 @@ document.addEventListener('click', async (ev) => {
     case 'imp-bild':      importBildWaehlen(); break;
     case 'imp-text':      await importAuswerten([], document.getElementById('imp-text').value); break;
     case 'imp-speichern': await importSpeichern(); break;
+    case 'lern-start':    lernStart(); break;
+    case 'lern-modus':    lern.modus = id; lernAktualisieren(); break;
+    case 'lern-zeile':    lernZeile(Number(id)); break;
+    case 'lern-wort':     { const i = Number(id); if (lern.woerter.has(i)) lern.woerter.delete(i); else lern.woerter.add(i); lernAktualisieren(); break; }
+    case 'lern-speichern': await lernSpeichern(); break;
+    case 'lern-zurueck':  lernZurueck(); break;
+    case 'format-loeschen': await formatLoeschen(id); break;
+    case 'import-gelerntes-loeschen': await gelerntesLoeschen(); break;
     case 'bearbeiten':    formOeffnen(daten.buchungen.find((b) => b.id === id)); break;
 
     // Formular
