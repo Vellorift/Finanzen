@@ -24,7 +24,7 @@
    So gibt es keine Rundungsfehler beim Zusammenrechnen.
    ===================================================================== */
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.5.0';
 
 /* ---------------------------------------------------------------------
    1. Hilfsfunktionen
@@ -308,7 +308,9 @@ const STANDARD_EINST = {
   importKategorien: {},
   // --- neu in 2.4 ---
   importFormate: [],       // in der App beigebrachte Screenshot-Formate (siehe impMitFormat)
-  importNamen: {},         // korrigierte Namen: { "lott (paypal)": "Lotto (PayPal)" }    // Screenshot-Import: { "riot games": kategorieId } → gleiche Kategorie wieder vorschlagen
+  importNamen: {},
+  // --- neu in 2.5 ---
+  kreditkarten: [],        // [{ id, name, endziffern, stichtag, abbuchung, woerter }] siehe 4c-2         // korrigierte Namen: { "lott (paypal)": "Lotto (PayPal)" }    // Screenshot-Import: { "riot games": kategorieId } → gleiche Kategorie wieder vorschlagen
 };
 
 async function startdatenAnlegen() {
@@ -437,6 +439,7 @@ async function vorlagenUebernehmen(m) {
       id: neueId(), erstellt: Date.now(), datum: vorlageDatum(v.tag, m), betrag: vorlageBetrag(v, m),
       art: v.art || 'ausgabe', kategorieId: v.kategorieId, notiz: v.name, vorlageId: v.id,
       ...(v.wunschId ? { wunschId: v.wunschId } : {}), // Sparrate für einen Wunsch → landet im Spartopf
+      ...(v.kartenId && karteVon(v.kartenId) ? { kartenId: v.kartenId } : {}), // läuft über die Kreditkarte
     });
   }
   toast(`${liste.length} Buchung${liste.length === 1 ? '' : 'en'} eingetragen ✓`);
@@ -454,21 +457,82 @@ function kontoInfo() {
   const e = daten.einst;
   if (e.kontoStand == null) return null;
   const h = heute();
-  const zaehlt = (b) => b.datum > e.kontoStichtag || (b.datum === e.kontoStichtag && (b.erstellt || 0) > e.kontoZeit);
+  // Kreditkarten-Zahlungen zählen erst am Abbuchungstag (kontoDatum), nicht am Kauftag
+  const zaehlt = (b, d) => d > e.kontoStichtag || (d === e.kontoStichtag && (b.erstellt || 0) > e.kontoZeit);
   const wirkung = (art, betrag) => (art === 'einnahme' ? betrag : -betrag);
 
-  let stand = e.kontoStand;
-  for (const b of daten.buchungen) if (zaehlt(b) && b.datum <= h) stand += wirkung(b.art, b.betrag);
-
-  // Vorschau Monatsende: schon eingetragene Buchungen mit späterem Datum
-  // + monatliche Buchungen, die diesen Monat noch kommen
   const monat = h.slice(0, 7);
-  let ende = stand;
-  for (const b of buchungenImMonat(monat)) if (b.datum > h && zaehlt(b)) ende += wirkung(b.art, b.betrag);
-  for (const v of fehlendeVorlagen(monat)) {
-    if (vorlageDatum(v.tag, monat) > h) ende += wirkung(v.art || 'ausgabe', vorlageBetrag(v, monat));
+  const monatsEnde = `${monat}-31`;
+  let stand = e.kontoStand, ende = 0, uebertrag = 0;
+  for (const b of daten.buchungen) {
+    const d = kontoDatum(b);
+    if (!zaehlt(b, d)) continue;
+    const w = wirkung(b.art, b.betrag);
+    if (d <= h) stand += w;
+    else if (d <= monatsEnde) ende += w;          // kommt diesen Monat noch
+    else if (b.datum <= monatsEnde) uebertrag += w; // mit Karte bezahlt, wird erst nächsten Monat abgebucht
   }
-  return { stand, ende };
+  // Vorschau Monatsende: schon eingetragene Buchungen mit späterem Datum
+  // + regelmäßige Buchungen, die diesen Monat noch kommen
+  ende += stand;
+  for (const v of fehlendeVorlagen(monat)) {
+    const datum = vorlageDatum(v.tag, monat);
+    const d = v.kartenId && karteVon(v.kartenId) ? kartenAbbuchung(karteVon(v.kartenId), datum) : datum;
+    const w = wirkung(v.art || 'ausgabe', vorlageBetrag(v, monat));
+    if (d > h && d <= monatsEnde) ende += w;
+    else if (d > monatsEnde) uebertrag += w;
+  }
+  return { stand, ende, uebertrag };
+}
+
+/* ---------------------------------------------------------------------
+   4c-2. Kreditkarten (seit 2.5)
+   Mit Karte bezahlt = zählt sofort als Ausgabe (Monatszahlen, Budgets),
+   geht aber erst am Abbuchungstag vom Girokonto weg.
+   Karte: { id, name, endziffern, stichtag (Abrechnung), abbuchung (Tag), woerter: [] }
+   gespeichert in daten.einst.kreditkarten (wird mit abgeglichen)
+   --------------------------------------------------------------------- */
+
+const karten = () => daten.einst.kreditkarten || [];
+const karteVon = (id) => karten().find((k) => k.id === id) || null;
+const karteName = (k) => (k.endziffern ? `${k.name} ·${k.endziffern}` : k.name);
+
+// Tag im Monat (31 = Monatsletzter, kürzere Monate → letzter Tag), ohne Wochenend-Verschiebung
+function tagImMonat(tag, monat) {
+  const [j, m] = monat.split('-').map(Number);
+  return `${monat}-${String(Math.min(tag || 1, new Date(j, m, 0).getDate())).padStart(2, '0')}`;
+}
+// Wann wird ein Kartenkauf vom Girokonto abgebucht?
+// 1) Abrechnung: nächster Abrechnungstag ab Kaufdatum (Kauf am Abrechnungstag zählt noch dazu)
+// 2) Abbuchung: der nächste Abbuchungstag ab der Abrechnung (Wochenende → Montag)
+function kartenAbbuchung(k, datum) {
+  const monat = datum.slice(0, 7);
+  let abr = tagImMonat(k.stichtag, monat);
+  if (datum > abr) abr = tagImMonat(k.stichtag, monatVerschieben(monat, 1));
+  let ab = tagImMonat(k.abbuchung ?? k.stichtag, abr.slice(0, 7));
+  if (ab < abr) ab = tagImMonat(k.abbuchung ?? k.stichtag, monatVerschieben(abr.slice(0, 7), 1));
+  return bankTag(ab);
+}
+// Datum, an dem eine Buchung das Girokonto trifft
+function kontoDatum(b) {
+  const k = b.kartenId && b.art !== 'sparen' ? karteVon(b.kartenId) : null;
+  return k ? kartenAbbuchung(k, b.datum) : b.datum;
+}
+// Was ist auf den Karten offen (schon gekauft, noch nicht abgebucht)?
+function kartenOffen() {
+  const h = heute();
+  return karten().map((k) => {
+    const termine = {};
+    for (const b of daten.buchungen) {
+      if (b.kartenId !== k.id || b.art === 'sparen' || b.datum > h) continue;
+      const d = kartenAbbuchung(k, b.datum);
+      if (d <= h) continue;
+      termine[d] = (termine[d] || 0) + (b.art === 'einnahme' ? -b.betrag : b.betrag);
+    }
+    const tage = Object.keys(termine).sort();
+    const summe = Object.values(termine).reduce((s, x) => s + x, 0);
+    return { k, summe, naechste: tage[0] || kartenAbbuchung(k, h), naechsteBetrag: termine[tage[0]] || 0, spaeter: tage.length > 1 };
+  });
 }
 
 /* ---------------------------------------------------------------------
@@ -1021,7 +1085,7 @@ function htmlKonto() {
         ${k ? '<button class="knopf" data-action="konto-abbrechen">Abbrechen</button>' : ''}
       </div>
       ${k ? '' : '<div class="klein grau" style="margin-top:8px">Danach rechnet die App mit deinen Buchungen selbst weiter.</div>'}
-    </section>`;
+    </section>${htmlKartenOffen() ? `<section class="karte">${htmlKartenOffen()}</section>` : ''}`;
   }
   const seit = new Date(e.kontoStichtag).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
   return `<section class="karte">
@@ -1029,8 +1093,19 @@ function htmlKonto() {
       <button class="x" data-action="konto-bearbeiten" aria-label="Kontostand abgleichen">${icon('stift')}</button></div>
     <div class="zahl mittel ${k.stand < 0 ? 'rot' : ''}" style="margin-top:-4px">${euroHtml(k.stand)}</div>
     ${k.ende !== k.stand ? `<div>Monatsende voraussichtlich <b class="${k.ende < 0 ? 'rot' : ''}">${euro(k.ende)}</b></div>` : ''}
+    ${htmlKartenOffen()}
     <div class="klein grau" style="margin-top:4px">Mit der Bank abgeglichen am ${seit} · seitdem eingetragene Buchungen sind eingerechnet</div>
   </section>`;
+}
+// Offene Beträge auf den Kreditkarten (gekauft, aber noch nicht vom Girokonto abgebucht)
+function htmlKartenOffen() {
+  const liste = kartenOffen().filter((x) => x.summe !== 0);
+  if (!liste.length) return '';
+  const kurz = (d) => d.split('-').reverse().slice(0, 2).join('.') + '.';
+  return liste.map((x) => `<div class="karten-offen">
+    <span>${icon('karte')} <b>${esc(karteName(x.k))}</b>: ${euro(x.summe)} offen</span>
+    <span class="klein grau">Abbuchung am ${kurz(x.naechste)}${x.spaeter ? ` (${euro(x.naechsteBetrag)}, Rest später)` : ''}</span>
+  </div>`).join('');
 }
 
 // --- Ziel-Karten ganz oben (wischen oder automatisch weiterdrehen) ---
@@ -1314,7 +1389,8 @@ function prognose(anzahl) {
     r.frei = r.ein - r.aus - r.spar;
 
     if (stand !== null) {
-      stand = i === 0 ? konto.ende - r.variabel : stand + r.frei;
+      // i === 1: dazu die Kartenzahlungen aus diesem Monat, die erst nächsten Monat abgebucht werden
+      stand = i === 0 ? konto.ende - r.variabel : stand + r.frei + (i === 1 ? konto.uebertrag : 0);
       r.konto = stand;
     }
     for (const k of daten.kredite) {
@@ -1432,7 +1508,7 @@ function htmlBuchungZeile(b) {
   return `<div class="buchung-wrap"><div class="loesch-hg">${icon('muell')} Löschen</div>
     <button class="buchung" data-action="bearbeiten" data-id="${b.id}">
       <span class="kat-symbol" style="background:${esc(k.farbe)}26;color:${esc(k.farbe)}">${w ? esc(wunschEmoji(w)) : buchstabe}</span>
-      <span class="mitte"><div>${esc(k.name)}${b.vorlageId ? ` <span class="grau">${icon('wiederholen')}</span>` : ''}${b.datum > heute() ? ' <span class="badge">geplant</span>' : ''}</div>
+      <span class="mitte"><div>${esc(k.name)}${b.vorlageId ? ` <span class="grau">${icon('wiederholen')}</span>` : ''}${b.datum > heute() ? ' <span class="badge">geplant</span>' : ''}${b.kartenId && karteVon(b.kartenId) && b.art !== 'sparen' ? ` <span class="badge karten-badge">${icon('karte')} ${esc(karteVon(b.kartenId).name)}</span>` : ''}</div>
         ${b.notiz ? `<div class="notiz">${esc(b.notiz)}</div>` : ''}</span>
       <span class="betrag ${farbe}">${vorzeichen}${euro(Math.abs(b.betrag))}</span>
     </button></div>`;
@@ -1774,7 +1850,7 @@ function htmlEinstellungen() {
     ${vorlagenSortiert.length ? vorlagenSortiert.map((v) => `
       <div class="katedit">
         <span class="punkt" style="background:${esc(kat(v.kategorieId)?.farbe || '#666')}"></span>
-        <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${vorzeichen[v.art || 'ausgabe']}${euro(v.betrag)} · ${(v.intervall || 1) > 1 ? `${intervallName(v.intervall).toLowerCase()}, nächste ${monatKurz(naechsteFaelligkeit(v) || heute().slice(0, 7))} · ` : ''}${tagText(v.tag)} · ${esc(kat(v.kategorieId)?.name || '?')}${kommendeAusnahmen(v).map(([m, b]) =>
+        <span style="flex:1">${esc(v.name)}<br><span class="klein grau">${vorzeichen[v.art || 'ausgabe']}${euro(v.betrag)} · ${(v.intervall || 1) > 1 ? `${intervallName(v.intervall).toLowerCase()}, nächste ${monatKurz(naechsteFaelligkeit(v) || heute().slice(0, 7))} · ` : ''}${tagText(v.tag)} · ${esc(kat(v.kategorieId)?.name || '?')}${v.kartenId && karteVon(v.kartenId) ? ` · 💳 ${esc(karteVon(v.kartenId).name)}` : ''}${kommendeAusnahmen(v).map(([m, b]) =>
           `<br><span class="gelb">✱ ${monatKurz(m)} einmalig ${vorzeichen[v.art || 'ausgabe']}${euro(b)}</span>`).join('')}</span></span>
         <button class="x" data-action="vorlage-bearbeiten" data-id="${v.id}" aria-label="Bearbeiten">${icon('stift')}</button>
         <button class="x" data-action="vorlage-loeschen" data-id="${v.id}" aria-label="Vorlage löschen">${icon('kreuz')}</button>
@@ -1795,6 +1871,9 @@ function htmlEinstellungen() {
     <div class="label">An welchem Tag?</div>
     ${htmlTagWahl('v-tag', ve?.tag || 1)}
     <label class="feld"><span>Kategorie</span><select id="v-kat">${katOptionen}</select></label>
+    ${karten().length ? `<label class="feld"><span>Bezahlt mit (bei Ausgaben)</span><select id="v-karte">
+      <option value="">Girokonto</option>
+      ${karten().map((x) => `<option value="${x.id}" ${x.id === ve?.kartenId ? 'selected' : ''}>Kreditkarte ${esc(karteName(x))}</option>`).join('')}</select></label>` : ''}
     ${ve ? `<div class="knopfreihe">
         <button class="knopf haupt" data-action="vorlage-neu">Speichern</button>
         <button class="knopf" data-action="vorlage-abbrechen">Abbrechen</button></div>`
@@ -1869,6 +1948,7 @@ function htmlEinstellungen() {
     <label class="feld"><span>Als „klein“ zählt alles bis (€)</span>${euroFeld('kleinGrenze', e.kleinGrenze)}</label>
   </section>
 
+  ${htmlKartenEinst()}
   ${htmlImportEinst()}
 
   ${htmlSync()}
@@ -1897,6 +1977,7 @@ const EINST_BEREICHE = [
   ['puffer', 'Puffer', 'Geld & Ziele', 'Notgroschen, Sparziel, Wunschtermin', 'notgroschen rücklage sparziel ziel termin karte'],
   ['vorlagen', 'Regelmäßige', 'Geld & Ziele', 'Fixkosten, Gehalt, Sparrate', 'vorlage fixkosten miete gehalt sparrate abo monatlich jährlich versicherung'],
   ['kredite', 'Kredite', 'Geld & Ziele', 'Restschuld, Raten, Leasing', 'kredit vertrag leasing ratenkauf rate restschuld zins tilgung'],
+  ['kreditkarten', 'Kreditkarten', 'Geld & Ziele', 'Abrechnung, Abbuchung, Erkennung', 'kreditkarte karte visa mastercard amex abrechnung abbuchung lastschrift endziffern'],
   ['budgets', 'Budgets', 'Geld & Ziele', 'Grenze pro Kategorie und Monat', 'budget limit grenze warnung'],
   ['kategorien', 'Kategorien', 'Geld & Ziele', 'Namen, Farben, Fixkosten', 'kategorie farbe fix einnahme ausgabe'],
   ['wuensche', 'Wünsche', 'Geld & Ziele', 'Ampel, Stundenlohn, Gedanken-Pause', 'wunsch ampel girokonto stundenlohn pause spaß'],
@@ -2060,6 +2141,8 @@ function formOeffnen(buchung) {
   const standardDatum = aktMonat === heute().slice(0, 7) ? heute() : `${aktMonat}-01`;
   form = buchung ? { ...buchung }
     : { art: 'ausgabe', betrag: null, kategorieId: null, datum: standardDatum, notiz: '' };
+  // Neue Buchung: zuletzt gewählte Zahlart vorschlagen (Girokonto oder Karte)
+  if (!buchung) { const z = localStorage.getItem('letzteKarte'); form.kartenId = z && karteVon(z) ? z : null; }
   const fav = form.id ? [] : favoriten();
   sheetOeffnen(`${sheetKopf(form.id ? 'Buchung bearbeiten' : 'Neue Buchung',
     form.id ? '' : `<button class="x akzent" data-action="imp-oeffnen" aria-label="Aus Screenshot importieren">${icon('bild')}</button>`)}
@@ -2078,6 +2161,7 @@ function formOeffnen(buchung) {
     <input type="hidden" id="f-datum" value="${form.datum}">
     <div class="chips" id="f-datum-wahl" style="margin-bottom:8px"></div>
     <div id="f-kalender" hidden></div>
+    <div id="f-karte-box"></div>
     <label class="feld"><span>Notiz (optional)</span><input type="text" id="f-notiz" value="${esc(form.notiz)}" placeholder="z. B. Bäcker, Kino …"></label>
     ${form.id ? '' : `<label class="check"><input type="checkbox" id="f-wiederkehrend">Regelmäßig wiederholen (als Vorlage merken)</label>
       <div id="f-tag-box" hidden style="margin:-6px 0 14px"></div>`}
@@ -2103,6 +2187,21 @@ function datumSetzen(d) {
   document.getElementById('f-datum').value = d;
   document.getElementById('f-kalender').hidden = true;
   datumWahlZeigen();
+  kartenWahlZeigen();
+}
+// „Bezahlt mit“: Girokonto oder eine Kreditkarte (nur wenn Karten angelegt sind, nicht bei Sparen)
+function kartenWahlZeigen() {
+  const box = document.getElementById('f-karte-box');
+  if (!box) return;
+  if (!karten().length || form.art === 'sparen') { box.innerHTML = ''; return; }
+  const k = karteVon(form.kartenId);
+  const ab = k ? kartenAbbuchung(k, form.datum || heute()) : null;
+  box.innerHTML = `<div class="label">Bezahlt mit</div>
+    <div class="chips" style="margin-bottom:${k ? 4 : 10}px">
+      <button type="button" class="chip ${k ? '' : 'an'}" data-action="f-karte" data-id="">${icon('bank')} Girokonto</button>
+      ${karten().map((x) => `<button type="button" class="chip ${x.id === k?.id ? 'an' : ''}" data-action="f-karte" data-id="${x.id}">${icon('karte')} ${esc(karteName(x))}</button>`).join('')}
+    </div>
+    ${k ? `<div class="klein grau" style="margin-bottom:10px">Zählt sofort als Ausgabe, wird aber erst am <b>${datumLang(ab)}</b> vom Girokonto abgebucht.</div>` : ''}`;
 }
 function kalenderZeigen() {
   const [j, m] = form.kalMonat.split('-').map(Number);
@@ -2133,6 +2232,7 @@ function formArtSetzen(art) {
   sheet().querySelectorAll('[data-art]').forEach((b) => b.classList.toggle('an', b.dataset.art === art));
   const kats = kategorienVon(art);
   if (kats.length === 1) form.kategorieId = kats[0].id; // nur eine Kategorie → direkt auswählen
+  kartenWahlZeigen();
   document.getElementById('f-kats').innerHTML = kats.map((k) =>
     `<button class="chip ${k.id === form.kategorieId ? 'an' : ''}" data-action="f-kat" data-id="${k.id}">
       <span class="punkt" style="background:${esc(k.farbe)}"></span>${esc(k.name)}</button>`).join('');
@@ -2149,14 +2249,16 @@ async function formSpeichern() {
 
   const b = { id: form.id || neueId(), datum, betrag, art: form.art,
     kategorieId: form.kategorieId, notiz, vorlageId: form.vorlageId || null,
-    erstellt: form.erstellt || Date.now(), ...(form.wunschId ? { wunschId: form.wunschId } : {}) };
+    erstellt: form.erstellt || Date.now(), ...(form.wunschId ? { wunschId: form.wunschId } : {}),
+    kartenId: form.art !== 'sparen' && karteVon(form.kartenId) ? form.kartenId : null };
+  if (!form.id && karten().length && form.art !== 'sparen') localStorage.setItem('letzteKarte', b.kartenId || '');
 
   // Häkchen "Regelmäßig" → zusätzlich eine Vorlage anlegen
   const wiederkehrend = document.getElementById('f-wiederkehrend');
   if (!form.id && wiederkehrend?.checked) {
     const intervall = intervallLesen('f-iv').intervall;
     const v = { id: neueId(), name: notiz || kat(b.kategorieId).name, betrag, art: form.art,
-      kategorieId: b.kategorieId, tag: tagLesen('f-tag'),
+      kategorieId: b.kategorieId, tag: tagLesen('f-tag'), kartenId: b.kartenId,
       intervall, startMonat: intervall > 1 ? datum.slice(0, 7) : null }; // Rhythmus startet im Monat dieser Buchung
     await speichern('vorlagen', v);
     b.vorlageId = v.id;
@@ -3478,6 +3580,22 @@ function importAnzeigen() {
 
   if (!gefunden.length) return importKeineTreffer();
 
+  // Kreditkarte erkennen: pro Bild über die letzten 4 Ziffern oder die Erkennungswörter
+  const kartenProQuelle = {};
+  for (const q of imp.quellen) {
+    const k = karteImText(q.zeilen.map((z) => z.text).join('\n'));
+    if (k) kartenProQuelle[q.nr] = k.id;
+  }
+  imp.karteErkannt = [...new Set(Object.values(kartenProQuelle))].map(karteVon);
+  for (const b of gefunden) {
+    b.kartenId = kartenProQuelle[b.quelle] || null;
+    // Sammel-Abbuchung der Kreditkarte vom Girokonto: die einzelnen Käufe sind schon gezählt
+    if (!b.kartenId && b.art !== 'einnahme' && istKartenAbrechnung(b.notizRoh || b.notiz)) {
+      b.abrechnung = true;
+      b.hinweis = 'Sieht aus wie die Kreditkarten-Abrechnung. Die einzelnen Kartenzahlungen sind schon gezählt – darum nicht angehakt.';
+    }
+  }
+
   // Schon eingetragen? (gleiche Art + gleicher Betrag, Datum höchstens 3 Tage auseinander)
   const belegt = new Set();
   const tage = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / 864e5;
@@ -3488,12 +3606,37 @@ function importAnzeigen() {
     b.doppelt = daten.buchungen.find((x) => !belegt.has(x.id) && x.art === b.art
       && x.betrag === b.betrag && tage(x.datum, b.datum) <= 3) || null;
     if (b.doppelt) belegt.add(b.doppelt.id);
-    b.an = !b.doppelt;
+    b.an = !b.doppelt && !b.abrechnung;
   }
   gefunden.sort((a, b) => b.datum.localeCompare(a.datum));
   imp.zeilen = gefunden;
   imp.methoden = [...methoden];
   importVorschau();
+}
+
+// Welche Kreditkarte steht im Text? Zuerst die letzten 4 Ziffern (z. B. „•••• 4417“, „*4417“, „XXXX4417“),
+// dann die Erkennungswörter
+function karteImText(text) {
+  const t = String(text || '');
+  for (const k of karten()) {
+    if (k.endziffern && new RegExp(`(?:[*•·.xX]\\s*|\\s{1,3}|^)${k.endziffern}(?!\\d)`, 'm').test(t)) {
+      // nicht verwechseln mit Beträgen wie „4417,00“ oder Jahreszahlen im Datum
+      if (!new RegExp(`${k.endziffern}\\s*[,.]\\d{2}(?!\\d)|\\d[.,/-]${k.endziffern}(?!\\d)`).test(t)
+        || new RegExp(`[*•·xX]\\s*${k.endziffern}(?!\\d)`).test(t)) return k;
+    }
+  }
+  // Zeilen der Sammel-Abbuchung („VISA Abrechnung“ auf dem Girokonto) zählen nicht als Kartenumsatz
+  const klein = t.toLowerCase().split('\n').filter((z) => !/abrechnung|lastschrift|abbuchung|kreditkartenabr/.test(z)).join('\n');
+  return karten().find((k) => (k.woerter || []).some((w) => w && klein.includes(w.toLowerCase()))) || null;
+}
+// Sammel-Lastschrift der Kreditkarte auf dem Girokonto („Kreditkartenabrechnung“, „VISA Abrechnung“ …)
+function istKartenAbrechnung(text) {
+  if (!karten().length) return false;
+  const t = String(text || '').toLowerCase();
+  if (/kreditkart|kartenabrechnung|card ?service|cardprocess/.test(t)) return true;
+  if (/abrechnung|saldo|lastschrift|abbuchung/.test(t)
+    && karten().some((k) => [k.name, ...(k.woerter || [])].some((w) => w && w.length > 2 && t.includes(w.toLowerCase())))) return true;
+  return false;
 }
 
 function importKeineTreffer() {
@@ -3516,6 +3659,7 @@ function importVorschau() {
   sheetOeffnen(`${sheetKopf('Erkannte Buchungen')}
     <div class="klein grau" style="margin-bottom:12px">Bitte kurz prüfen. Alles ist änderbar. Nur Buchungen mit Haken werden gespeichert.
       ${imp.methoden?.length ? `<br>Erkannt über: ${esc(imp.methoden.join(', '))}` : ''}</div>
+    ${imp.karteErkannt?.length ? `<div class="hinweis-klein">${icon('karte')} Kreditkarte erkannt: <b>${esc(imp.karteErkannt.map(karteName).join(', '))}</b> – wird erst bei der Abrechnung vom Girokonto abgebucht.</div>` : ''}
     ${z.map((b, i) => `<div class="imp-zeile ${b.an ? '' : 'aus'}" id="imp-z-${i}">
       <div class="imp-kopf">
         <input type="checkbox" data-imp="an" data-i="${i}" ${b.an ? 'checked' : ''} aria-label="Übernehmen">
@@ -3529,6 +3673,9 @@ function importVorschau() {
         </div>
         <select data-imp="kat" data-i="${i}" aria-label="Kategorie">${katOptionen(b)}</select>
       </div>
+      ${karten().length && b.art !== 'sparen' ? `<select class="imp-karte" data-imp="karte" data-i="${i}" aria-label="Bezahlt mit">
+        <option value="">Bezahlt mit: Girokonto</option>
+        ${karten().map((k) => `<option value="${k.id}" ${k.id === b.kartenId ? 'selected' : ''}>Bezahlt mit: 💳 ${esc(karteName(k))}</option>`).join('')}</select>` : ''}
       ${b.hinweis ? `<div class="klein gelb" style="margin-top:6px">⚠ ${esc(b.hinweis)}</div>` : ''}
       ${b.doppelt ? `<div class="klein gelb" style="margin-top:6px">⚠ Schon eingetragen? ${euro(b.doppelt.betrag)} am ${datumAnzeige(b.doppelt.datum)}${b.doppelt.notiz ? ` „${esc(b.doppelt.notiz)}“` : ''}</div>` : ''}
     </div>`).join('')}
@@ -3553,6 +3700,7 @@ function importFeld(el) {
       importKnopf();
       break;
     case 'notiz': b.notiz = el.value; break;
+    case 'karte': b.kartenId = el.value || null; break;
     case 'datum': {
       const m = el.value.trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$/);
       b.datum = m ? impDatumAus(m[3].length === 2 ? '20' + m[3] : m[3], m[2], m[1]) : null;
@@ -3587,7 +3735,8 @@ async function importSpeichern() {
   const neu = [];
   for (const [n, b] of auswahl.entries()) {
     const buchung = { id: neueId(), datum: b.datum, betrag: b.betrag, art: b.art, kategorieId: b.kategorieId,
-      notiz: b.notiz.trim(), vorlageId: null, erstellt: jetzt + n };
+      notiz: b.notiz.trim(), vorlageId: null, erstellt: jetzt + n,
+      kartenId: b.art !== 'sparen' && karteVon(b.kartenId) ? b.kartenId : null };
     await speichern('buchungen', buchung);
     neu.push(buchung);
     const s = impSchluessel(b.notiz);
@@ -3721,6 +3870,66 @@ function lernZurueck() {
 }
 
 // Einstellungen → Screenshot-Import
+let karteInBearbeitung = null;
+function htmlKartenEinst() {
+  const ke = karteVon(karteInBearbeitung);
+  const kurz = (d) => d.split('-').reverse().slice(0, 2).join('.') + '.';
+  return `<section class="karte"><h2>${icon('karte')} Kreditkarten</h2>
+    <div class="klein grau" style="margin-bottom:10px">Kartenzahlungen zählen sofort als Ausgabe, werden aber erst einmal im Monat
+      vom Girokonto abgebucht. Beim Eintragen wählst du „Bezahlt mit“. Im Screenshot erkennt die App die Karte an den
+      letzten 4 Ziffern oder an den Erkennungswörtern.</div>
+    ${karten().length ? karten().map((k) => `<div class="katedit">
+        <span style="flex:1"><b>${esc(karteName(k))}</b><br><span class="klein grau">Abrechnung ${tagText(k.stichtag)} · Abbuchung ${tagText(k.abbuchung ?? k.stichtag)} · nächste ${kurz(kartenAbbuchung(k, heute()))}${k.woerter?.length ? `<br>erkennt: ${esc(k.woerter.join(' · '))}` : ''}</span></span>
+        <button class="x" data-action="karte-bearbeiten" data-id="${k.id}" aria-label="Bearbeiten">${icon('stift')}</button>
+        <button class="x" data-action="karte-loeschen" data-id="${k.id}" aria-label="Karte löschen">${icon('kreuz')}</button>
+      </div>`).join('') : '<div class="klein grau">Noch keine Kreditkarte.</div>'}
+    <div id="kk-formular" ${ke ? 'class="bearbeiten-box"' : ''}>
+    <div class="unter">${ke ? `✎ Bearbeiten: ${esc(ke.name)}` : 'Neue Karte'}</div>
+    <div class="zwei">
+      <label class="feld"><span>Name</span><input type="text" id="kk-name" placeholder="z. B. Visa" value="${esc(ke?.name || '')}"></label>
+      <label class="feld"><span>Letzte 4 Ziffern</span><input type="text" id="kk-ziffern" inputmode="numeric" maxlength="4" placeholder="optional" value="${esc(ke?.endziffern || '')}"></label>
+    </div>
+    <div class="label">Abrechnung (Monatsabschluss der Karte) am</div>
+    ${htmlTagWahl('kk-stichtag', ke?.stichtag || 15)}
+    <div class="label">Abbuchung vom Girokonto am</div>
+    ${htmlTagWahl('kk-abbuchung', ke?.abbuchung ?? ke?.stichtag ?? 15)}
+    <div class="klein grau" style="margin:-4px 0 10px">Steht auf der Kreditkarten-Abrechnung. Weißt du nur einen Tag, nimm zweimal denselben.</div>
+    <label class="feld"><span>Erkennungswörter im Screenshot (optional, mit Komma)</span>
+      <input type="text" id="kk-woerter" placeholder="z. B. Visa, Kreditkarte" value="${esc((ke?.woerter || []).join(', '))}"></label>
+    ${ke ? `<div class="knopfreihe">
+        <button class="knopf haupt" data-action="karte-speichern">Speichern</button>
+        <button class="knopf" data-action="karte-abbrechen">Abbrechen</button></div>`
+      : '<button class="knopf" data-action="karte-speichern">Karte hinzufügen</button>'}
+    </div>
+  </section>`;
+}
+async function karteSpeichern() {
+  const name = document.getElementById('kk-name').value.trim();
+  const endziffern = document.getElementById('kk-ziffern').value.replace(/\D/g, '').slice(-4);
+  if (!name) return toast('Bitte einen Namen eingeben');
+  if (endziffern && endziffern.length !== 4) return toast('Bitte genau 4 Ziffern (oder leer lassen)');
+  const woerter = document.getElementById('kk-woerter').value.split(',').map((w) => w.trim()).filter(Boolean);
+  const k = { id: karteInBearbeitung || neueId(), name, endziffern, woerter,
+    stichtag: tagLesen('kk-stichtag'), abbuchung: tagLesen('kk-abbuchung') };
+  const liste = karten().filter((x) => x.id !== k.id);
+  const pos = karten().findIndex((x) => x.id === k.id);
+  liste.splice(pos < 0 ? liste.length : pos, 0, k);
+  daten.einst.kreditkarten = liste;
+  karteInBearbeitung = null;
+  await einstSpeichern(); render();
+  einstZeigen('kreditkarten');
+  toast(pos < 0 ? 'Karte hinzugefügt ✓' : 'Änderungen gespeichert ✓');
+}
+async function karteLoeschen(id) {
+  const k = karteVon(id);
+  const n = daten.buchungen.filter((b) => b.kartenId === id).length;
+  if (!confirm(`Karte „${k.name}“ löschen?${n ? `\n${n} Buchung${n === 1 ? '' : 'en'} zählen dann wieder als Girokonto-Zahlung.` : ''}`)) return;
+  const vorher = karten();
+  daten.einst.kreditkarten = vorher.filter((x) => x.id !== id);
+  await einstSpeichern(); render(); einstZeigen('kreditkarten');
+  toast('Karte gelöscht', 'Rückgängig', async () => { daten.einst.kreditkarten = vorher; await einstSpeichern(); render(); einstZeigen('kreditkarten'); });
+}
+
 function htmlImportEinst() {
   const formate = daten.einst.importFormate || [];
   const n = Object.keys(daten.einst.importNamen || {}).length;
@@ -3832,11 +4041,16 @@ document.addEventListener('click', async (ev) => {
     case 'lern-speichern': await lernSpeichern(); break;
     case 'lern-zurueck':  lernZurueck(); break;
     case 'format-loeschen': await formatLoeschen(id); break;
+    case 'karte-speichern': await karteSpeichern(); break;
+    case 'karte-loeschen': await karteLoeschen(id); break;
+    case 'karte-bearbeiten': karteInBearbeitung = id; render(); einstZeigen('kreditkarten', 'kk-formular'); break;
+    case 'karte-abbrechen': karteInBearbeitung = null; render(); einstZeigen('kreditkarten'); break;
     case 'import-gelerntes-loeschen': await gelerntesLoeschen(); break;
     case 'bearbeiten':    formOeffnen(daten.buchungen.find((b) => b.id === id)); break;
 
     // Formular
     case 'f-art': formArtSetzen(el.dataset.art); break;
+    case 'f-karte': form.kartenId = el.dataset.id || null; kartenWahlZeigen(); break;
     case 'f-kat':
       form.kategorieId = id;
       document.querySelectorAll('#f-kats .chip').forEach((c) => c.classList.toggle('an', c.dataset.id === id));
@@ -3905,23 +4119,25 @@ document.addEventListener('click', async (ev) => {
       const art = document.getElementById('v-art').value;
       const kategorieId = document.getElementById('v-kat').value;
       const { intervall, startMonat } = intervallLesen('v-iv');
+      const kartenWahl = document.getElementById('v-karte')?.value;
+      const kartenId = art !== 'sparen' && kartenWahl && karteVon(kartenWahl) ? kartenWahl : null;
       if (!name || !betrag || betrag <= 0) return toast('Bitte Name und Betrag eingeben');
       if (!kategorieId) return toast('Bitte eine Kategorie wählen');
       const alt = daten.vorlagen.find((v) => v.id === vorlageInBearbeitung);
       if (alt) {
         // Bearbeiten: vorhandene Vorlage ändern (id und Kredit-Verknüpfung bleiben)
-        await speichern('vorlagen', { ...alt, name, betrag, tag, art, kategorieId, intervall, startMonat });
+        await speichern('vorlagen', { ...alt, name, betrag, tag, art, kategorieId, intervall, startMonat, kartenId });
         // Schon eingetragene Buchung im aktuellen Monat gleich mit korrigieren?
         const monat = heute().slice(0, 7);
         const gebucht = daten.buchungen.find((b) => b.vorlageId === alt.id && b.datum.startsWith(monat));
         if (gebucht && confirm(`Für ${monatName(monat)} ist „${alt.name}“ schon eingetragen.\nSoll diese Buchung auch angepasst werden?`)) {
-          await speichern('buchungen', { ...gebucht, betrag: alt.ausnahmen?.[monat] ?? betrag, art, kategorieId, notiz: name,
+          await speichern('buchungen', { ...gebucht, betrag: alt.ausnahmen?.[monat] ?? betrag, art, kategorieId, notiz: name, kartenId,
             datum: vorlageDatum(tag, monat) });
         }
         vorlageInBearbeitung = null;
         render(); toast('Änderungen gespeichert ✓');
       } else {
-        await speichern('vorlagen', { id: neueId(), name, betrag, tag, art, kategorieId, intervall, startMonat });
+        await speichern('vorlagen', { id: neueId(), name, betrag, tag, art, kategorieId, intervall, startMonat, kartenId });
         render(); toast('Vorlage gespeichert ✓');
       }
       break;

@@ -6,7 +6,7 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 - **App:** https://vellorift.github.io/finanzen/
 - **Code:** GitHub-Repository `Vellorift/finanzen` (öffentlich, Branch `main`, GitHub Pages aus `/ (root)`)
 - **Abgleich-Daten:** privates Repository `Vellorift/finanzen-daten`, dort nur die verschlüsselte Datei `daten.json`
-- **Aktuelle Version:** 2.4.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
+- **Aktuelle Version:** 2.5.0 (steht in `app.js` als `APP_VERSION` und unten in den Einstellungen)
 
 ## Wer ist der Nutzer / wie arbeiten wir
 
@@ -46,7 +46,8 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 4. Berechnungen (Monatszahlen, Puffer-Reichweite, kleine Ausgaben, fällige Vorlagen, Rhythmus `vorlageFaellig()`, `bankTag()`/`vorlageDatum()`: Wochenende → Montag, `vorlageBetrag()`: einmalige Beträge)
 4a. Tagauswahl (1. · 8. · 15. · Letzter · Anderer), Rhythmus-Auswahl, Monat/Jahr-Auswahl
 4b. Kredite & Verträge (`kreditInfo()`, Restschuld aus Laufzeit per Barwert)
-4c. Girokonto (`kontoInfo()`: Stand fortschreiben + Monatsende-Vorschau)
+4c. Girokonto (`kontoInfo()`: Stand fortschreiben + Monatsende-Vorschau, `uebertrag` = Kartenzahlungen, die erst nächsten Monat abgebucht werden → `prognose()` Monat 2)
+4c-2. Kreditkarten (`karten()`, `karteVon()`, `kartenAbbuchung(karte, datum)`: nächster Abrechnungstag ab Kauf → nächster Abbuchungstag → `bankTag()`, `kontoDatum(b)` = Tag, an dem die Buchung das Girokonto trifft, `kartenOffen()` für die Übersicht). Einstellungen → Kreditkarten (`htmlKartenEinst()`), Formular „Bezahlt mit“ (`kartenWahlZeigen()`, letzte Wahl in localStorage `letzteKarte`), Import: `karteImText()` (Endziffern/Erkennungswörter pro Bild), `istKartenAbrechnung()` (Sammel-Abbuchung wird nicht angehakt)
 4d. Wünsche & Traum-Projekte (`wunschGesamt/Gespart/Rest()`, `wunschPlan()` = Ampel + „ab wann“ für alle Wünsche der Reihe nach, Gedanken-Pause, Arbeitsstunden)
 4e. Ziele für die Karten oben (`alleZiele()`, `zielTempo()`, `zielPrognose()`, Meilensteine + Konfetti)
 4f. Analyse (`analyse(n)`), Schnell-Favoriten (`favoriten()`), Abos (`abos()`)
@@ -69,19 +70,19 @@ Ziel: sehen, wohin das Geld geht, und einen finanziellen Puffer aufbauen („Pay
 Alle Beträge in **Cent** (Ganzzahlen). Jeder Eintrag hat `id` (UUID) und `geaendert` (ms-Zeitstempel, wird von `speichern()` gesetzt).
 Gelöschte Einträge bleiben als Löschmarkierung `{ id, geloescht: true, geaendert }` in der Datenbank (wichtig für den Abgleich). `allesLaden()` filtert sie heraus.
 
-- **buchungen:** `datum`, `betrag`, `art` (`ausgabe` | `einnahme` | `sparen`), `kategorieId`, `notiz`, `vorlageId`, `erstellt`, optional `wunschId`
+- **buchungen:** `datum`, `betrag`, `art` (`ausgabe` | `einnahme` | `sparen`), `kategorieId`, `notiz`, `vorlageId`, `erstellt`, optional `wunschId`, optional `kartenId` (seit 2.5: mit Kreditkarte bezahlt → zählt als Ausgabe am Kauftag, aufs Girokonto erst am Abbuchungstag)
   - `sparen` = Geld aufs Sparkonto, zählt **nicht** als Ausgabe. Ein Datum in der Zukunft gilt als „geplant“.
   - `sparen` mit **negativem** Betrag = Entnahme aus dem Spartopf (z. B. beim Kauf eines Wunsches), erhöht den Girokonto-Stand.
 - **kategorien:** `name`, `art`, `fix` (Fixkosten ja/nein), `farbe`, `reihenfolge`, optional `budget` (Cent pro Monat). Die Spar-Kategorie „Spartöpfe“ wird bei Bedarf automatisch angelegt.
-- **vorlagen** (regelmäßige Buchungen): `name`, `betrag`, `art`, `kategorieId`, `tag` (1–31, **31 = Monatsletzter**), `intervall` (1/3/6/12), `startMonat` (`"2027-01"`, nur bei Intervall > 1), optional `kreditId`, optional `ausnahmen` (`{ "2026-12": 350000 }` = einmalig anderer Betrag in diesem Monat, z. B. Prämie oder Sondertilgung; bei Krediten senkt er die Restschuld über `rateImMonat()`), optional `wunschId` (Sparrate für einen Wunsch), optional `geprueft` (ms, Abo geprüft)
+- **vorlagen** (regelmäßige Buchungen): `name`, `betrag`, `art`, `kategorieId`, `tag` (1–31, **31 = Monatsletzter**), `intervall` (1/3/6/12), `startMonat` (`"2027-01"`, nur bei Intervall > 1), optional `kreditId`, optional `ausnahmen` (`{ "2026-12": 350000 }` = einmalig anderer Betrag in diesem Monat, z. B. Prämie oder Sondertilgung; bei Krediten senkt er die Restschuld über `rateImMonat()`), optional `wunschId` (Sparrate für einen Wunsch), optional `geprueft` (ms, Abo geprüft), optional `kartenId` (läuft über die Kreditkarte, wird in die Buchung übernommen)
 - **kredite:** `typ` (`kredit` | `vertrag`), `name`, `rate`, `tag`
   - `kredit`: `restschuld` + `stichtag` (wird bis heute fortgeschrieben), `zins` (%, optional, unter „Erweiterte Angaben“), `ursprung` (optional), `geschaetzt` (Restschuld aus Laufzeit berechnet)
   - `vertrag` (z. B. Leasing): `ende` (`"2028-03"` = Monat der letzten Rate)
 - **wuensche** (neu in 2.0): `typ` (`wunsch` | `projekt`), `name`, `emoji`, `preis` (nur Wunsch), `teile` (nur Projekt: `[{ id, name, preis, gekauft, gekauftAm }]`), `prio` (`muss` | `schoen` | `spass`), `termin` (`"2027-05"` oder null), `startGespart`, `kategorieId` (für die Kauf-Buchung), `link`, `notiz`, `istZiel` (⭐ = Karte oben), `reihenfolge`, `angelegt` (ms), `status` (`offen` | `erfuellt`), `erfuelltAm`
   - Spartopf = `startGespart` + alle `sparen`-Buchungen mit dieser `wunschId` (wird berechnet, nicht gespeichert)
-- **einstellungen:** ein Eintrag `id: 'haupt'`, u. a. `puffer`, `zielName`, `zielBetrag`, `zielGleichPuffer`, `zielStand`, `kleinGrenze`, `letztesBackup`, `kontoStand`, `kontoStichtag`, `kontoZeit`; seit 2.0: `zielTermin`, `zielAnzeigen`, `kontoUntergrenze` (Wünsche-Ampel), `stundenlohn`, `pauseGrenze`, `akzent`, `amoled`, `startScreen` (`immer`|`taeglich`|`aus`), `rueckblickGesehen`, `meilensteine`; seit 2.1: `importKategorien` (`{ "riot games": kategorieId }`, Screenshot-Import merkt sich die Kategorie); seit 2.4: `importFormate` (`[{ id, name, woerter, nameOffset, zweckOffset, datum: 'auto'|'ueberschrift'|Offset, ignorieren, ignorierDatumZeilen, ignorierOhneText, art }]`), `importNamen` (`{ "lott (paypal)": "Lotto (PayPal)" }`)
+- **einstellungen:** ein Eintrag `id: 'haupt'`, u. a. `puffer`, `zielName`, `zielBetrag`, `zielGleichPuffer`, `zielStand`, `kleinGrenze`, `letztesBackup`, `kontoStand`, `kontoStichtag`, `kontoZeit`; seit 2.0: `zielTermin`, `zielAnzeigen`, `kontoUntergrenze` (Wünsche-Ampel), `stundenlohn`, `pauseGrenze`, `akzent`, `amoled`, `startScreen` (`immer`|`taeglich`|`aus`), `rueckblickGesehen`, `meilensteine`; seit 2.1: `importKategorien` (`{ "riot games": kategorieId }`, Screenshot-Import merkt sich die Kategorie); seit 2.4: `importFormate` (`[{ id, name, woerter, nameOffset, zweckOffset, datum: 'auto'|'ueberschrift'|Offset, ignorieren, ignorierDatumZeilen, ignorierOhneText, art }]`), `importNamen` (`{ "lott (paypal)": "Lotto (PayPal)" }`); seit 2.5: `kreditkarten` (`[{ id, name, endziffern, stichtag, abbuchung, woerter }]`, Tag 31 = Monatsletzter)
 - **geraet:** nur für dieses Gerät, **wird nie abgeglichen oder gesichert**. Eintrag `id: 'sync'` mit `repo`, `token`, `schluessel` (nicht exportierbarer CryptoKey), `salt`, `zuletzt`; Eintrag `id: 'sperre'` mit `credId` (App-Sperre per Fingerabdruck)
-- **localStorage** `startScreenTag`: an welchem Tag der Start-Bildschirm zuletzt kam (pro Gerät)
+- **localStorage** `startScreenTag`: an welchem Tag der Start-Bildschirm zuletzt kam (pro Gerät); `letzteKarte`: zuletzt gewählte Zahlart im Formular
 
 Neue Tabellen nur über eine höhere `DB_VERSION` anlegen. Neue Felder brauchen keine Migration, aber Standardwerte beim Lesen (`|| 1`, `?? null` …).
 
@@ -128,6 +129,7 @@ Neue Tabellen nur über eine höhere `DB_VERSION` anlegen. Neue Felder brauchen 
 - **2.2** Screenshot-Import erkennt auch Zahlungs-Benachrichtigungen (z. B. easybank „Zahlung erfolgreich – 3,87 EUR bei REWE …“), mehrere auf einem Bild, „von …“ = Einnahme
 - **2.3** Einstellungen aufgeräumt: jeder Bereich ist eine zugeklappte Zeile (Symbol, Überschrift, Kurzbeschreibung), Antippen klappt auf. Gruppen „Geld & Ziele“ und „App“. Lupe oben rechts durchsucht alle Einstellungen (Überschriften, Suchwörter wie „Fingerabdruck“ oder „Notgroschen“, Feldnamen und Einträge wie „Miete“)
 - **2.4** Screenshot-Import für alle Formate: allgemeine Erkennung (Betrag mit EUR/€, Name daneben/darüber/darunter, viele Datumsformen, Farbe rot/grün, Kontostand wird übersprungen), **Format beibringen** direkt in der App (Zeilen antippen, wird gespeichert + abgeglichen, hat Vorrang), **lernt aus Korrekturen** (geänderte Namen). Einstellungen → Screenshot-Import
+- **2.5** Kreditkarten: Einstellungen → Kreditkarten (Name, letzte 4 Ziffern, Abrechnungs- und Abbuchungstag, Erkennungswörter). Beim Eintragen „Bezahlt mit: Girokonto / Karte“ (auch bei regelmäßigen Buchungen). Kartenzahlungen zählen sofort als Ausgabe, gehen aber erst am Abbuchungstag vom Girokonto weg (Kontostand, Monatsende, Ausblick). Übersicht zeigt „Visa: X € offen · Abbuchung am …“. Screenshot-Import erkennt die Karte an den Endziffern/Wörtern, die Sammel-Abbuchung („Kreditkartenabrechnung“) wird nicht angehakt
 
 ## Fahrplan / offene Punkte
 

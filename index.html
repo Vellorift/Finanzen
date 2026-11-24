@@ -73,6 +73,12 @@
   .einmalig-box .knopf { background:var(--karte3); }
   .leer { text-align:center; color:var(--grau); padding:30px 10px; }
   .tippbar { cursor:pointer; }
+  .karten-offen { display:flex; flex-direction:column; gap:2px; margin-top:10px; padding-top:10px; border-top:1px solid var(--rand); }
+  .karten-offen .ic { width:16px; height:16px; vertical-align:-3px; }
+  .karte > .karten-offen:first-child { margin-top:0; padding-top:0; border-top:0; }
+  .badge.karten-badge .ic { width:12px; height:12px; vertical-align:-2px; }
+  .imp-karte { width:100%; margin-top:8px; font-size:.85rem; padding:8px 10px; }
+  .hinweis-klein { background:var(--akzent-weich); border:1px solid var(--rand2); border-radius:12px; padding:10px 12px; margin-bottom:12px; font-size:.88rem; }
   .badge { display:inline-block; font-size:.72rem; padding:2px 8px; border-radius:10px; background:var(--karte3); color:var(--grau); font-weight:600; vertical-align:2px; }
   .trenner { height:1px; background:var(--rand); margin:12px 0; }
 
